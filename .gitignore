@@ -1,0 +1,14 @@
+# Hyper Panel Installer — only push the script + patches
+Hyper-Source/
+extracted/
+backup.tar.gz
+cloudflared.deb
+hyper-utility*
+installer.sh
+.bash*
+.lesshst
+.mysql_history
+.netrc
+.profile
+.wget-hsts
+Hyper.zip
