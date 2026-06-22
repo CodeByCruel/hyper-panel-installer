@@ -15,7 +15,9 @@
 #    [6] Repair / Re-patch Hyper
 #    [7] Update Hyper
 #==============================================================================
-set -euo pipefail
+set -uo pipefail
+# NOTE: we do NOT use set -e because interactive `read` and `|| fallback`
+# patterns need the shell to keep going on individual command failures.
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 PANEL_PATH="${PANEL_PATH:-/var/www/pterodactyl}"
@@ -70,7 +72,7 @@ ask_value() {
     fi
     echo -n "* $prompt [$default]: "
     read -r input
-    eval "$var='${input:-$default}'"
+    printf -v "$var" '%s' "${input:-$default}"
 }
 
 panel_installed() {
@@ -227,7 +229,7 @@ SQL
         err "Failed to download panel."
 
     log "Extracting panel..."
-    tar -xzf "$TMP_DL/panel.tar.gz" -C "$PANEL_PATH" 2>/dev/null || \
+    tar -xzf "$TMP_DL/panel.tar.gz" -C "$PANEL_PATH" --strip-components=1 2>/dev/null || \
         err "Failed to extract panel."
     rm -rf "$TMP_DL"
 
@@ -305,8 +307,9 @@ ENVEOF
 
     # ── Permissions ────────────────────────────────────────────────────────
     step "Setting Permissions"
-    chown -R www-data:www-data "$PANEL_PATH"/*
-    chmod -R 755 "$PANEL_PATH/storage"/* "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
+    chown -R www-data:www-data "$PANEL_PATH"
+    chmod -R 755 "$PANEL_PATH/storage"/* 2>/dev/null || true
+    chmod -R 755 "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
 
     # ── Cache ──────────────────────────────────────────────────────────────
     step "Building Caches"
@@ -323,11 +326,12 @@ ENVEOF
 
     # ── Admin User ─────────────────────────────────────────────────────────
     step "Creating Admin User"
+    ESCAPED_PASS=$(printf '%s' "$ADMIN_PASSWORD" | sed "s/'/\\\\'/g")
     php "$PANEL_PATH/artisan" tinker --execute="
 use Pterodactyl\Models\User;
 User::factory()->create([
     'email' => '${ADMIN_EMAIL}',
-    'password' => bcrypt('${ADMIN_PASSWORD}'),
+    'password' => bcrypt('${ESCAPED_PASS}'),
     'root_admin' => true,
     'email_verified_at' => now(),
 ]);
@@ -417,21 +421,25 @@ uninstall_panel() {
     [[ "$CONFIRM" != "DELETE" ]] && info "Uninstall cancelled." && return
 
     # Stop services
-    supervisorctl stop pterodactyl-worker 2>/dev/null || true
-    supervisorctl stop pterodactyl-scheduler 2>/dev/null || true
-    supervisorctl stop pterodactyl-discord 2>/dev/null || true
+    command -v supervisorctl &>/dev/null && {
+        supervisorctl stop pterodactyl-worker 2>/dev/null || true
+        supervisorctl stop pterodactyl-scheduler 2>/dev/null || true
+        supervisorctl stop pterodactyl-discord 2>/dev/null || true
+    }
 
     # Remove supervisor configs
     rm -f /etc/supervisor/conf.d/pterodactyl-worker.conf
     rm -f /etc/supervisor/conf.d/pterodactyl-scheduler.conf
     rm -f /etc/supervisor/conf.d/pterodactyl-discord.conf
-    supervisorctl reread 2>/dev/null || true
-    supervisorctl update 2>/dev/null || true
+    command -v supervisorctl &>/dev/null && {
+        supervisorctl reread 2>/dev/null || true
+        supervisorctl update 2>/dev/null || true
+    }
 
     # Remove nginx
     rm -f /etc/nginx/sites-available/pterodactyl.conf
     rm -f /etc/nginx/sites-enabled/pterodactyl.conf
-    nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+    command -v nginx &>/dev/null && nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
 
     # Remove logrotate
     rm -f /etc/logrotate.d/pterodactyl
@@ -475,8 +483,10 @@ uninstall_wings() {
     rm -f "$WINGS_PATH/wings"
     rm -rf /etc/pterodactyl
     rm -rf /var/log/wings
-    supervisorctl reread 2>/dev/null || true
-    supervisorctl update 2>/dev/null || true
+    command -v supervisorctl &>/dev/null && {
+        supervisorctl reread 2>/dev/null || true
+        supervisorctl update 2>/dev/null || true
+    }
 
     log "Wings uninstalled."
 }
@@ -498,8 +508,9 @@ repair_hyper() {
     apply_hyper
 
     log "Fixing permissions..."
-    chown -R www-data:www-data "$PANEL_PATH"/*
-    chmod -R 755 "$PANEL_PATH/storage"/* "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
+    chown -R www-data:www-data "$PANEL_PATH"
+    chmod -R 755 "$PANEL_PATH/storage"/* 2>/dev/null || true
+    chmod -R 755 "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
 
     log "Clearing caches..."
     cd "$PANEL_PATH"
@@ -596,7 +607,7 @@ update_hyper() {
     php artisan event:cache 2>/dev/null || true
     php artisan view:cache 2>/dev/null || true
 
-    chown -R www-data:www-data "$PANEL_PATH"/*
+    chown -R www-data:www-data "$PANEL_PATH"
 
     log "Hyper updated to latest version!"
 }
@@ -895,12 +906,6 @@ configure_nginx() {
 server {
     listen 80;
     server_name ${FQDN};
-    return 301 https://\$host\$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name ${FQDN};
     root ${PANEL_PATH}/public;
     index index.html index.htm index.php;
     charset utf-8;
@@ -924,7 +929,7 @@ server {
         fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_param HTTP_PROXY "http";
-        fastcgi_param HTTPS on;
+        fastcgi_param HTTPS off;
         fastcgi_buffers 16 16k;
         fastcgi_buffer_size 32k;
         fastcgi_intercept_errors on;
@@ -943,10 +948,13 @@ NGINX
 
     ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
     rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-    nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null
+    nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || true
 }
 
 configure_supervisor() {
+    mkdir -p /var/log/pterodactyl
+    chown www-data:www-data /var/log/pterodactyl 2>/dev/null || true
+
     cat > /etc/supervisor/conf.d/pterodactyl-worker.conf <<'SUPERVISOR'
 [program:pterodactyl-worker]
 command=php /var/www/pterodactyl/artisan queue:work --queue=high,standard,default,low --sleep=3 --tries=3 --timeout=90 --memory=256
@@ -976,8 +984,6 @@ stderr_logfile=/var/log/pterodactyl/scheduler.err.log
 stdout_logfile=/dev/null
 SUPERVISOR
 
-    mkdir -p /var/log/pterodactyl
-    chown www-data:www-data /var/log/pterodactyl
     supervisorctl reread 2>/dev/null || true
     supervisorctl update 2>/dev/null || true
     supervisorctl start pterodactyl-worker 2>/dev/null || true
