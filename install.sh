@@ -1,180 +1,648 @@
 #!/bin/bash
 #==============================================================================
-# Hyper Game Panel — One-Line Installer (License-Free Build)
-# Usage: bash <(curl -sL https://raw.githubusercontent.com/you/repo/main/install.sh)
-# Or:    wget -qO- https://raw.githubusercontent.com/you/repo/main/install.sh | bash
+#  Hyper Panel — All-in-One Installer
+#  Installs Pterodactyl Panel + Hyper Theme (license-free)
+#
+#  Usage: bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-installer/main/install.sh)
+#
+#  Options:
+#    [0] Install Panel + Hyper
+#    [1] Install Wings
+#    [2] Install Panel + Hyper + Wings (full stack)
+#    [3] Uninstall Panel
+#    [4] Uninstall Wings
+#    [5] Uninstall Everything
+#    [6] Repair / Re-patch Hyper
+#    [7] Update Hyper
 #==============================================================================
 set -euo pipefail
 
-# ─── Config ──────────────────────────────────────────────────────────────────
+# ─── Constants ───────────────────────────────────────────────────────────────
 PANEL_PATH="${PANEL_PATH:-/var/www/pterodactyl}"
+WINGS_PATH="/usr/local/bin"
+LOG_PATH="/var/log/pterodactyl-installer.log"
+OFFICIAL_INSTALLER="https://pterodactyl-installer.se"
+HYPER_VERSION="v2.0.12"
+HYPER_API="https://license.dgenx.net/api/v1/update-check?app_id=7c4efcdc-986e-4e85-9b07-328d6ad6db52&file_slug=default"
 DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-3306}"
 DB_NAME="${DB_NAME:-pterodactyl}"
 DB_USER="${DB_USER:-pterodactyl}"
-FQDN="${FQDN:-$(hostname -f)}"
+FQDN="${FQDN:-}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 TIMEZONE="${TIMEZONE:-UTC}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin@$(hostname -f)}"
-ADMIN_PASSWORD="${ADMIN_PASSWORD:-ChangeMeNow123!}"
 
-# Colors
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+# ─── Colors ──────────────────────────────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 log()  { echo -e "${GREEN}[✓]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err()  { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 info() { echo -e "${BLUE}[i]${NC} $1"; }
+step() { echo -e "\n${CYAN}${BOLD}── $1 ──${NC}"; }
 
-# ─── Pre-flight ──────────────────────────────────────────────────────────────
-[[ $EUID -ne 0 ]] && err "Must run as root. Use: sudo bash $0"
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+check_root() {
+    [[ $EUID -ne 0 ]] && err "Must run as root. Use: sudo bash $0"
+}
 
-echo -e "${GREEN}"
-echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║        Hyper Game Panel — License-Free Installer         ║"
-echo "║                      v2.0.12                             ║"
-echo "╚═══════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
+check_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        OS_VERSION=$VERSION_ID
+    else
+        err "Cannot detect OS."
+    fi
+    case "$OS" in
+        debian|ubuntu) log "Detected $PRETTY_NAME" ;;
+        *) err "Only Debian/Ubuntu is supported. Detected: $OS" ;;
+    esac
+}
 
-# ─── Detect OS ───────────────────────────────────────────────────────────────
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-    OS_VERSION=$VERSION_ID
-else
-    err "Cannot detect OS. Only Debian/Ubuntu supported."
-fi
+ask_value() {
+    local prompt="$1" default="$2" var="$3"
+    if [ -n "${!var:-}" ]; then
+        info "$prompt: ${!var}"
+        return
+    fi
+    echo -n "* $prompt [$default]: "
+    read -r input
+    eval "$var='${input:-$default}'"
+}
 
-case "$OS" in
-    debian|ubuntu) log "Detected $OS $OS_VERSION" ;;
-    *) err "Only Debian/Ubuntu is supported. Detected: $OS" ;;
-esac
+panel_installed() {
+    [ -d "$PANEL_PATH" ] && [ -f "$PANEL_PATH/artisan" ]
+}
 
-# ─── Install System Packages ────────────────────────────────────────────────
-log "Installing system packages..."
-export DEBIAN_FRONTEND=noninteractive
+wings_installed() {
+    command -v wings &>/dev/null
+}
 
-# Add PHP 8.4 repo (ondrej/php)
-apt-get update -y >/dev/null 2>&1
-apt-get install -y software-properties-common curl wget unzip git >/dev/null 2>&1
+hyper_patched() {
+    [ -f "$PANEL_PATH/app/Http/Middleware/HyperV2LicenseGate.php" ] &&
+    grep -q "return \$next(\$request)" "$PANEL_PATH/app/Http/Middleware/HyperV2LicenseGate.php" 2>/dev/null
+}
 
-if ! php8.4 -v &>/dev/null; then
-    info "Adding PHP 8.4 repository..."
-    add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
+# ─── Banner ──────────────────────────────────────────────────────────────────
+show_banner() {
+    clear
+    echo -e "${GREEN}"
+    cat << 'BANNER'
+    _   _           _     _   _ _____  _
+   | | | |_ __  ___| |__ | | | |_   _|(_)_ __   __ _
+   | | | | '_ \/ __| '_ \| | | | | | | | | '_ \ / _` |
+   | |_| | | | \__ \ | | | |_| | | | | | | | | (_| |
+    \___/|_| |_|___/_| |_|\___/  |_| |_|_|_| |_|\__, |
+                                                  |___/
+BANNER
+    echo -e "${NC}"
+    echo -e "  ${BOLD}Pterodactyl + Hyper Game Panel — All-in-One Installer${NC}"
+    echo -e "  ${BLUE}https://github.com/CodeByCruel/hyper-panel-installer${NC}\n"
+}
+
+# ─── Main Menu ───────────────────────────────────────────────────────────────
+main_menu() {
+    show_banner
+    echo -e "${BOLD}What would you like to do?${NC}\n"
+
+    echo -e "  ${GREEN}[0]${NC} Install Panel + Hyper  (base Pterodactyl + Hyper theme)"
+    echo -e "  ${GREEN}[1]${NC} Install Wings           (game server daemon)"
+    echo -e "  ${GREEN}[2]${NC} Install Everything       (Panel + Hyper + Wings)"
+    echo ""
+    echo -e "  ${RED}[3]${NC} Uninstall Panel"
+    echo -e "  ${RED}[4]${NC} Uninstall Wings"
+    echo -e "  ${RED}[5]${NC} Uninstall Everything"
+    echo ""
+    echo -e "  ${YELLOW}[6]${NC} Repair / Re-patch Hyper"
+    echo -e "  ${YELLOW}[7]${NC} Update Hyper to latest"
+    echo ""
+
+    echo -n "* Choose option (0-7): "
+    read -r CHOICE
+
+    case "${CHOICE:-}" in
+        0) install_panel_hyper ;;
+        1) install_wings ;;
+        2) install_panel_hyper; install_wings ;;
+        3) uninstall_panel ;;
+        4) uninstall_wings ;;
+        5) uninstall_panel; uninstall_wings ;;
+        6) repair_hyper ;;
+        7) update_hyper ;;
+        *) err "Invalid option. Please choose 0-7." ;;
+    esac
+}
+
+#==============================================================================
+#                           INSTALL FUNCTIONS
+#==============================================================================
+
+# ─── Install Panel + Hyper ──────────────────────────────────────────────────
+install_panel_hyper() {
+    step "Installing Pterodactyl Panel + Hyper Game Panel"
+
+    check_root
+    check_os
+
+    if panel_installed; then
+        warn "Panel already exists at $PANEL_PATH"
+        echo -n "* Re-install? This will backup current panel (y/N): "
+        read -r CONFIRM
+        if [[ ! "$CONFIRM" =~ [Yy] ]]; then
+            info "Skipping panel installation."
+            apply_hyper
+            return
+        fi
+        backup_panel
+    fi
+
+    # ── Ask for config ────────────────────────────────────────────────────
+    echo ""
+    step "Configuration"
+    ask_value "Panel domain (FQDN)" "$(hostname -f)" FQDN
+    ask_value "Admin email" "admin@${FQDN}" ADMIN_EMAIL
+    ask_value "Admin password" "ChangeMeNow123!" ADMIN_PASSWORD
+    ask_value "Database name" "pterodactyl" DB_NAME
+    ask_value "Database user" "pterodactyl" DB_USER
+    ask_value "Timezone" "UTC" TIMEZONE
+
+    # Generate DB password
+    DB_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 32)
+
+    # ── Install base system ───────────────────────────────────────────────
+    step "Installing System Packages"
+    export DEBIAN_FRONTEND=noninteractive
+
     apt-get update -y >/dev/null 2>&1
-fi
+    apt-get install -y software-properties-common curl wget unzip git >/dev/null 2>&1
 
-log "Installing PHP 8.4 and extensions..."
-apt-get install -y \
-    php8.4 php8.4-cli php8.4-fpm \
-    php8.4-bcmath php8.4-curl php8.4-gd \
-    php8.4-mbstring php8.4-mysql php8.4-opcache \
-    php8.4-xml php8.4-zip php8.4-intl php8.4-redis \
-    nginx mariadb-server redis-server \
-    composer certbot python3-certbot-nginx \
-    supervisor logrotate >/dev/null 2>&1
+    # PHP 8.4
+    if ! php8.4 -v &>/dev/null; then
+        info "Adding PHP 8.4 repository..."
+        add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
+        apt-get update -y >/dev/null 2>&1
+    fi
 
-log "Installing IonCube Loader for PHP 8.4..."
-IC_EXT_DIR=$(php8.4 -r "echo ini_get('extension_dir');" 2>/dev/null)
-IC_URL="https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz"
-IC_TMP=$(mktemp -d)
+    log "Installing PHP 8.4 + extensions..."
+    apt-get install -y \
+        php8.4 php8.4-cli php8.4-fpm \
+        php8.4-bcmath php8.4-curl php8.4-gd \
+        php8.4-mbstring php8.4-mysql php8.4-opcache \
+        php8.4-xml php8.4-zip php8.4-intl php8.4-redis \
+        nginx mariadb-server redis-server \
+        composer certbot python3-certbot-nginx \
+        supervisor logrotate >/dev/null 2>&1
 
-if ! php8.4 -m 2>/dev/null | grep -q "ionCube Loader"; then
-    curl -fsSL -o "$IC_TMP/ioncube.tar.gz" "$IC_URL" >/dev/null 2>&1
-    tar -xzf "$IC_TMP/ioncube.tar.gz" -C "$IC_TMP" >/dev/null 2>&1
-    cp "$IC_TMP/ioncube/ioncube_loader_lin_8.4.so" "$IC_EXT_DIR/" 2>/dev/null
-    cat > /etc/php/8.4/mods-available/00-ioncube.ini <<IONCUBE
-zend_extension="${IC_EXT_DIR}/ioncube_loader_lin_8.4.so"
-opcache.jit=0
-opcache.jit_buffer_size=0
-IONCUBE
-    phpenmod -v 8.4 -s cli 00-ioncube 2>/dev/null || true
-    phpenmod -v 8.4 -s fpm 00-ioncube 2>/dev/null || true
-    log "IonCube Loader installed"
-else
-    log "IonCube Loader already installed"
-fi
+    # IonCube Loader
+    install_ioncube
 
-# ─── Start Services ─────────────────────────────────────────────────────────
-log "Starting services..."
-systemctl enable --now mysql >/dev/null 2>&1 || service mysql start >/dev/null 2>&1
-systemctl enable --now redis-server >/dev/null 2>&1 || service redis-server start >/dev/null 2>&1
-systemctl enable --now php8.4-fpm >/dev/null 2>&1 || service php8.4-fpm start >/dev/null 2>&1
+    # Start services
+    systemctl enable --now mysql 2>/dev/null || service mysql start 2>/dev/null || true
+    systemctl enable --now redis-server 2>/dev/null || service redis-server start 2>/dev/null || true
+    systemctl enable --now php8.4-fpm 2>/dev/null || service php8.4-fpm start 2>/dev/null || true
 
-# ─── Database Setup ─────────────────────────────────────────────────────────
-log "Configuring database..."
-DB_PASS=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 32)
-
-mysql -u root <<SQL >/dev/null 2>&1
+    # ── Database ───────────────────────────────────────────────────────────
+    step "Configuring Database"
+    mysql -u root <<SQL >/dev/null 2>&1
 CREATE DATABASE IF NOT EXISTS ${DB_NAME};
 CREATE USER IF NOT EXISTS '${DB_USER}'@'${DB_HOST}' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'${DB_HOST}';
 FLUSH PRIVILEGES;
 SQL
-log "Database configured"
+    log "Database ready"
 
-# ─── Download Panel ─────────────────────────────────────────────────────────
-log "Downloading Hyper Game Panel v2.0.12..."
-mkdir -p "$PANEL_PATH"
+    # ── Download Panel ─────────────────────────────────────────────────────
+    step "Downloading Pterodactyl Panel"
+    mkdir -p "$PANEL_PATH"
 
-# Fetch latest download URL from API
-API_URL="https://license.dgenx.net/api/v1/update-check?app_id=7c4efcdc-986e-4e85-9b07-328d6ad6db52&file_slug=default"
-DOWNLOAD_URL=$(curl -fsSL "$API_URL" 2>/dev/null | \
-    php -r '$r=json_decode(file_get_contents("php://stdin"),true);echo $r["latest_version"]["download_url"]??"";' 2>/dev/null || true)
+    # Download latest release from GitHub
+    PTERO_URL="https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz"
+    log "Downloading panel from GitHub..."
+    TMP_DL=$(mktemp -d)
+    curl -fSL --retry 3 -o "$TMP_DL/panel.tar.gz" "$PTERO_URL" 2>/dev/null || \
+        wget -q -O "$TMP_DL/panel.tar.gz" "$PTERO_URL" 2>/dev/null || \
+        err "Failed to download panel."
 
-if [ -z "$DOWNLOAD_URL" ] || [[ "$DOWNLOAD_URL" != http* ]]; then
-    err "Failed to resolve download URL. Check your internet connection."
-fi
+    log "Extracting panel..."
+    tar -xzf "$TMP_DL/panel.tar.gz" -C "$PANEL_PATH" 2>/dev/null || \
+        err "Failed to extract panel."
+    rm -rf "$TMP_DL"
 
-TMP_DOWNLOAD=$(mktemp -d)
-ARCHIVE="$TMP_DOWNLOAD/Hyper.zip"
-curl -fSL --retry 3 -o "$ARCHIVE" "$DOWNLOAD_URL" >/dev/null 2>&1 || \
-    wget -q -O "$ARCHIVE" "$DOWNLOAD_URL" >/dev/null 2>&1 || \
-    err "Failed to download panel archive."
+    # ── Composer ───────────────────────────────────────────────────────────
+    step "Installing Composer Dependencies"
+    cd "$PANEL_PATH"
+    export COMPOSER_ALLOW_SUPERUSER=1
+    composer install --no-dev --optimize-autoloader --no-interaction 2>/dev/null || \
+        err "Composer install failed."
 
-# Extract
-info "Extracting panel files..."
-rm -rf "$PANEL_PATH"
-mkdir -p "$PANEL_PATH"
-tar -xf "$ARCHIVE" -C "$PANEL_PATH" 2>/dev/null || \
-    unzip -oq "$ARCHIVE" -d "$PANEL_PATH" 2>/dev/null || \
-    err "Failed to extract archive."
-rm -rf "$TMP_DOWNLOAD"
+    # ── Environment ────────────────────────────────────────────────────────
+    step "Configuring Environment"
+    cp "$PANEL_PATH/.env.example" "$PANEL_PATH/.env" 2>/dev/null || true
 
-# ─── Apply License Patches ──────────────────────────────────────────────────
-log "Applying license patches..."
+    APP_KEY=$(php -r "echo 'base64:'.base64_encode(random_bytes(32));")
 
-# Middleware stubs
-cat > "$PANEL_PATH/app/Http/Middleware/HyperV2LicenseGate.php" <<'STUB'
+    cat > "$PANEL_PATH/.env" <<ENVEOF
+APP_ENV=production
+APP_DEBUG=false
+APP_KEY=${APP_KEY}
+APP_URL=https://${FQDN}
+APP_TIMEZONE=${TIMEZONE}
+APP_LOCALE=en
+APP_SERVICE_AUTHOR=unknown@unknown.com
+APP_ENVIRONMENT_ONLY=false
+
+DB_HOST=${DB_HOST}
+DB_PORT=${DB_PORT}
+DB_DATABASE=${DB_NAME}
+DB_USERNAME=${DB_USER}
+DB_PASSWORD=${DB_PASS}
+
+CACHE_DRIVER=redis
+SESSION_DRIVER=redis
+QUEUE_CONNECTION=redis
+REDIS_HOST=127.0.0.1
+
+MAIL_MAILER=log
+MAIL_HOST=127.0.0.1
+MAIL_PORT=2525
+MAIL_USERNAME=null
+MAIL_PASSWORD=null
+MAIL_ENCRYPTION=null
+MAIL_FROM_ADDRESS="noreply@${FQDN}"
+MAIL_FROM_NAME="${DB_NAME}"
+
+APP_REPORT_ALL_EXCEPTIONS=false
+APP_2FA_REQUIRED=0
+GUZZLE_TIMEOUT=15
+GUZZLE_CONNECT_TIMEOUT=5
+PTERODACTYL_TELEMETRY_ENABLED=false
+ENVEOF
+
+    # ── Generate App Key via artisan ──────────────────────────────────────
+    php "$PANEL_PATH/artisan" key:generate --force 2>/dev/null || true
+
+    # ── Migrate Database ──────────────────────────────────────────────────
+    step "Running Database Migrations"
+    php "$PANEL_PATH/artisan" migrate --force 2>/dev/null || true
+
+    # Seed
+    php "$PANEL_PATH/artisan" db:seed --class=NestSeeder --force --no-interaction 2>/dev/null || true
+    php "$PANEL_PATH/artisan" db:seed --class=EggSeeder --force --no-interaction 2>/dev/null || true
+
+    # ── Apply Hyper ───────────────────────────────────────────────────────
+    apply_hyper
+
+    # ── Nginx ──────────────────────────────────────────────────────────────
+    step "Configuring Nginx"
+    configure_nginx
+
+    # ── Supervisor ─────────────────────────────────────────────────────────
+    step "Configuring Supervisor"
+    configure_supervisor
+
+    # ── Permissions ────────────────────────────────────────────────────────
+    step "Setting Permissions"
+    chown -R www-data:www-data "$PANEL_PATH"/*
+    chmod -R 755 "$PANEL_PATH/storage"/* "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
+
+    # ── Cache ──────────────────────────────────────────────────────────────
+    step "Building Caches"
+    cd "$PANEL_PATH"
+    php artisan config:cache 2>/dev/null || true
+    php artisan event:cache 2>/dev/null || true
+    php artisan route:cache 2>/dev/null || true
+    php artisan view:cache 2>/dev/null || true
+
+    # ── SSL ────────────────────────────────────────────────────────────────
+    step "SSL Certificate"
+    certbot --nginx -d "$FQDN" --non-interactive --agree-tos --email "$ADMIN_EMAIL" 2>/dev/null || \
+        warn "SSL skipped. Run: certbot --nginx -d $FQDN"
+
+    # ── Admin User ─────────────────────────────────────────────────────────
+    step "Creating Admin User"
+    php "$PANEL_PATH/artisan" tinker --execute="
+use Pterodactyl\Models\User;
+User::factory()->create([
+    'email' => '${ADMIN_EMAIL}',
+    'password' => bcrypt('${ADMIN_PASSWORD}'),
+    'root_admin' => true,
+    'email_verified_at' => now(),
+]);
+echo 'Admin user created.';
+" 2>/dev/null || warn "Admin user may already exist"
+
+    # ── Done ───────────────────────────────────────────────────────────────
+    show_complete
+}
+
+# ─── Install Wings ──────────────────────────────────────────────────────────
+install_wings() {
+    step "Installing Pterodactyl Wings"
+
+    check_root
+    check_os
+
+    if wings_installed; then
+        warn "Wings is already installed."
+        echo -n "* Re-install? (y/N): "
+        read -r CONFIRM
+        [[ ! "$CONFIRM" =~ [Yy] ]] && return
+    fi
+
+    log "Installing Docker..."
+    if ! command -v docker &>/dev/null; then
+        curl -fsSL https://get.docker.com | sh 2>/dev/null || err "Docker install failed."
+    fi
+    systemctl enable --now docker 2>/dev/null || true
+
+    log "Downloading Wings..."
+    WINGS_VERSION=$(curl -fsSL https://api.github.com/repos/pterodactyl/wings/releases/latest 2>/dev/null | \
+        php -r 'echo json_decode(file_get_contents("php://stdin"),true)["tag_name"]??"";' 2>/dev/null || echo "v1.0.7")
+
+    curl -fSL -o "$WINGS_PATH/wings" \
+        "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64" 2>/dev/null || \
+        err "Failed to download Wings."
+    chmod u+x "$WINGS_PATH/wings"
+
+    # Supervisor config for Wings
+    cat > /etc/supervisor/conf.d/wings.conf <<SUPERVISOR
+[program:wings]
+command=/usr/local/bin/wings
+directory=/etc/pterodactyl
+user=root
+autostart=true
+autorestart=true
+startretries=3
+stderr_logfile=/var/log/wings/wings.err.log
+stdout_logfile=/var/log/wings/wings.out.log
+SUPERVISOR
+
+    mkdir -p /var/log/wings /etc/pterodactyl
+    supervisorctl reread 2>/dev/null || true
+    supervisorctl update 2>/dev/null || true
+
+    log "Wings installed. Configure at: https://your-panel/admin/nodes"
+    echo -e "\n${YELLOW}Run this on your NODE server to connect:${NC}"
+    echo "  wings configure --panel-url https://${FQDN:-your-panel} --token YOUR_NODE_TOKEN"
+    echo ""
+}
+
+#==============================================================================
+#                         UNINSTALL FUNCTIONS
+#==============================================================================
+
+uninstall_panel() {
+    step "Uninstalling Pterodactyl Panel"
+
+    check_root
+
+    if ! panel_installed; then
+        warn "Panel not found at $PANEL_PATH. Nothing to uninstall."
+        return
+    fi
+
+    echo -e "\n${RED}${BOLD}WARNING: This will remove:${NC}"
+    echo "  - Panel files at $PANEL_PATH"
+    echo "  - Nginx configuration"
+    echo "  - Supervisor worker configs"
+    echo "  - Logrotate configs"
+    echo ""
+    echo -e "${YELLOW}Database will NOT be deleted (safe).${NC}"
+    echo ""
+    echo -n "* Type 'DELETE' to confirm uninstall: "
+    read -r CONFIRM
+    [[ "$CONFIRM" != "DELETE" ]] && info "Uninstall cancelled." && return
+
+    # Stop services
+    supervisorctl stop pterodactyl-worker 2>/dev/null || true
+    supervisorctl stop pterodactyl-scheduler 2>/dev/null || true
+    supervisorctl stop pterodactyl-discord 2>/dev/null || true
+
+    # Remove supervisor configs
+    rm -f /etc/supervisor/conf.d/pterodactyl-worker.conf
+    rm -f /etc/supervisor/conf.d/pterodactyl-scheduler.conf
+    rm -f /etc/supervisor/conf.d/pterodactyl-discord.conf
+    supervisorctl reread 2>/dev/null || true
+    supervisorctl update 2>/dev/null || true
+
+    # Remove nginx
+    rm -f /etc/nginx/sites-available/pterodactyl.conf
+    rm -f /etc/nginx/sites-enabled/pterodactyl.conf
+    nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
+
+    # Remove logrotate
+    rm -f /etc/logrotate.d/pterodactyl
+
+    # Remove panel files
+    rm -rf "$PANEL_PATH"
+
+    # Remove cron/sudoers
+    rm -f /etc/sudoers.d/hyper_update 2>/dev/null || true
+
+    # Remove logs
+    rm -rf /var/log/pterodactyl
+
+    log "Panel uninstalled. Database '$DB_NAME' preserved."
+    echo -n "* Drop database too? (y/N): "
+    read -r DROP_DB
+    if [[ "$DROP_DB" =~ [Yy] ]]; then
+        mysql -u root -e "DROP DATABASE IF EXISTS ${DB_NAME};" 2>/dev/null || true
+        mysql -u root -e "DROP USER IF EXISTS '${DB_USER}'@'${DB_HOST}';" 2>/dev/null || true
+        mysql -u root -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+        log "Database dropped."
+    fi
+}
+
+uninstall_wings() {
+    step "Uninstalling Wings"
+
+    check_root
+
+    if ! wings_installed; then
+        warn "Wings not found. Nothing to uninstall."
+        return
+    fi
+
+    echo -n "* Type 'DELETE' to confirm: "
+    read -r CONFIRM
+    [[ "$CONFIRM" != "DELETE" ]] && info "Uninstall cancelled." && return
+
+    supervisorctl stop wings 2>/dev/null || true
+    rm -f /etc/supervisor/conf.d/wings.conf
+    rm -f "$WINGS_PATH/wings"
+    rm -rf /etc/pterodactyl
+    rm -rf /var/log/wings
+    supervisorctl reread 2>/dev/null || true
+    supervisorctl update 2>/dev/null || true
+
+    log "Wings uninstalled."
+}
+
+#==============================================================================
+#                         REPAIR / UPDATE FUNCTIONS
+#==============================================================================
+
+repair_hyper() {
+    step "Repairing / Re-patching Hyper Game Panel"
+
+    check_root
+
+    if ! panel_installed; then
+        err "Panel not found at $PANEL_PATH. Install first."
+    fi
+
+    log "Re-applying Hyper patches..."
+    apply_hyper
+
+    log "Fixing permissions..."
+    chown -R www-data:www-data "$PANEL_PATH"/*
+    chmod -R 755 "$PANEL_PATH/storage"/* "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
+
+    log "Clearing caches..."
+    cd "$PANEL_PATH"
+    php artisan config:clear 2>/dev/null || true
+    php artisan cache:clear 2>/dev/null || true
+    php artisan route:clear 2>/dev/null || true
+    php artisan view:clear 2>/dev/null || true
+    php artisan config:cache 2>/dev/null || true
+    php artisan event:cache 2>/dev/null || true
+    php artisan view:cache 2>/dev/null || true
+    php artisan route:cache 2>/dev/null || php artisan route:clear 2>/dev/null || true
+
+    log "Restarting services..."
+    supervisorctl restart pterodactyl-worker 2>/dev/null || true
+    supervisorctl restart pterodactyl-scheduler 2>/dev/null || true
+    systemctl restart php8.4-fpm 2>/dev/null || service php8.4-fpm restart 2>/dev/null || true
+    systemctl restart nginx 2>/dev/null || service nginx restart 2>/dev/null || true
+
+    log "Repair complete!"
+}
+
+update_hyper() {
+    step "Updating Hyper Game Panel"
+
+    check_root
+
+    if ! panel_installed; then
+        err "Panel not found at $PANEL_PATH. Install first."
+    fi
+
+    # Backup current Hyper files
+    log "Backing up current state..."
+    BACKUP_NAME="hyper_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
+    cd /var/www 2>/dev/null || true
+    tar -czf "$BACKUP_NAME" \
+        pterodactyl/DGEN/ \
+        pterodactyl/public/DGEN/ \
+        pterodactyl/public/assets/hyper* \
+        pterodactyl/app/Http/Middleware/HyperV2* \
+        pterodactyl/app/Http/Middleware/EnforceHyper* \
+        pterodactyl/app/Http/Middleware/SetSecurity* \
+        pterodactyl/app/Http/Controllers/Api/Application/License* \
+        pterodactyl/app/Services/Hyper* \
+        pterodactyl/app/Services/License* \
+        pterodactyl/app/Services/Addon* \
+        pterodactyl/app/Services/CrossVps* \
+        pterodactyl/app/Traits/ValidatesSecure* \
+        pterodactyl/bootstrap/cache/hyperv2* \
+        2>/dev/null || true
+    log "Backup saved: /var/www/$BACKUP_NAME"
+
+    # Download latest Hyper
+    log "Fetching latest Hyper version..."
+    DOWNLOAD_URL=$(curl -fsSL "$HYPER_API" 2>/dev/null | \
+        php -r '$r=json_decode(file_get_contents("php://stdin"),true);echo $r["latest_version"]["download_url"]??"";' 2>/dev/null || true)
+
+    if [ -z "$DOWNLOAD_URL" ] || [[ "$DOWNLOAD_URL" != http* ]]; then
+        err "Failed to fetch latest Hyper version from API."
+    fi
+
+    TMP_DL=$(mktemp -d)
+    curl -fSL --retry 3 -o "$TMP_DL/Hyper.zip" "$DOWNLOAD_URL" 2>/dev/null || \
+        err "Failed to download Hyper."
+
+    log "Extracting and applying..."
+    rm -f "$PANEL_PATH/public/assets/licenseService"*.js 2>/dev/null || true
+    rm -f "$PANEL_PATH/public/assets/LicenseMonitor"*.js 2>/dev/null || true
+
+    cd "$PANEL_PATH"
+    unzip -oq "$TMP_DL/Hyper.zip" -d "$TMP_DL/hyper" 2>/dev/null || \
+        tar -xf "$TMP_DL/Hyper.zip" -C "$TMP_DL/hyper" 2>/dev/null || true
+
+    # Copy Hyper files over panel
+    [ -d "$TMP_DL/hyper/app" ] && cp -rf "$TMP_DL/hyper/app/"* "$PANEL_PATH/app/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/public" ] && cp -rf "$TMP_DL/hyper/public/"* "$PANEL_PATH/public/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/config" ] && cp -rf "$TMP_DL/hyper/config/"* "$PANEL_PATH/config/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/database" ] && cp -rf "$TMP_DL/hyper/database/"* "$PANEL_PATH/database/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/resources" ] && cp -rf "$TMP_DL/hyper/resources/"* "$PANEL_PATH/resources/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/routes" ] && cp -rf "$TMP_DL/hyper/routes/"* "$PANEL_PATH/routes/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/bootstrap" ] && cp -rf "$TMP_DL/hyper/bootstrap/"* "$PANEL_PATH/bootstrap/" 2>/dev/null || true
+
+    rm -rf "$TMP_DL"
+
+    # Re-apply patches
+    apply_hyper
+
+    # Rebuild caches
+    log "Rebuilding caches..."
+    php artisan config:clear 2>/dev/null || true
+    php artisan cache:clear 2>/dev/null || true
+    php artisan route:clear 2>/dev/null || true
+    php artisan view:clear 2>/dev/null || true
+    php artisan config:cache 2>/dev/null || true
+    php artisan event:cache 2>/dev/null || true
+    php artisan view:cache 2>/dev/null || true
+
+    chown -R www-data:www-data "$PANEL_PATH"/*
+
+    log "Hyper updated to latest version!"
+}
+
+#==============================================================================
+#                         CORE PATCH FUNCTION
+#==============================================================================
+
+apply_hyper() {
+    log "Applying Hyper license patches..."
+
+    # ── Middleware stubs ───────────────────────────────────────────────────
+    mkdir -p "$PANEL_PATH/app/Http/Middleware"
+
+    cat > "$PANEL_PATH/app/Http/Middleware/HyperV2LicenseGate.php" <<'STUB'
 <?php
 namespace Pterodactyl\Http\Middleware;
 use Closure;use Illuminate\Http\Request;
 class HyperV2LicenseGate{public function handle(Request $request,Closure $next){return $next($request);}}
 STUB
 
-cat > "$PANEL_PATH/app/Http/Middleware/HyperV2SecurityMonitor.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Http/Middleware/HyperV2SecurityMonitor.php" <<'STUB'
 <?php
 namespace Pterodactyl\Http\Middleware;
 use Closure;use Illuminate\Http\Request;
 class HyperV2SecurityMonitor{public function handle(Request $request,Closure $next){return $next($request);}}
 STUB
 
-cat > "$PANEL_PATH/app/Http/Middleware/EnforceHyperV2PanelAccess.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Http/Middleware/EnforceHyperV2PanelAccess.php" <<'STUB'
 <?php
 namespace Pterodactyl\Http\Middleware;
 use Closure;use Illuminate\Http\Request;
 class EnforceHyperV2PanelAccess{public function handle(Request $request,Closure $next){return $next($request);}}
 STUB
 
-cat > "$PANEL_PATH/app/Http/Middleware/SetSecurityHeaders.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Http/Middleware/SetSecurityHeaders.php" <<'STUB'
 <?php
 namespace Pterodactyl\Http\Middleware;
 use Closure;use Illuminate\Http\Request;
 class SetSecurityHeaders{public function handle(Request $request,Closure $next){$r=$next($request);$r->headers->set('X-Content-Type-Options','nosniff');$r->headers->set('X-Frame-Options','DENY');$r->headers->set('X-XSS-Protection','1; mode=block');return $r;}}
 STUB
 
-# License Controller
-mkdir -p "$PANEL_PATH/app/Http/Controllers/Api/Application"
-cat > "$PANEL_PATH/app/Http/Controllers/Api/Application/LicenseController.php" <<'STUB'
+    # ── License Controller ────────────────────────────────────────────────
+    mkdir -p "$PANEL_PATH/app/Http/Controllers/Api/Application"
+
+    cat > "$PANEL_PATH/app/Http/Controllers/Api/Application/LicenseController.php" <<'STUB'
 <?php
 namespace Pterodactyl\Http\Controllers\Api\Application;
 use Illuminate\Http\JsonResponse;use Illuminate\Http\Request;use Illuminate\Routing\Controller;
@@ -184,8 +652,10 @@ class LicenseController extends Controller{
 }
 STUB
 
-# License Services
-cat > "$PANEL_PATH/app/Services/HyperV2LicenseService.php" <<'STUB'
+    # ── Services ──────────────────────────────────────────────────────────
+    mkdir -p "$PANEL_PATH/app/Services"
+
+    cat > "$PANEL_PATH/app/Services/HyperV2LicenseService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class HyperV2LicenseService{
@@ -199,7 +669,7 @@ class HyperV2LicenseService{
 }
 STUB
 
-cat > "$PANEL_PATH/app/Services/LicenseValidationService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/LicenseValidationService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class LicenseValidationService{
@@ -211,224 +681,217 @@ class LicenseValidationService{
 }
 STUB
 
-cat > "$PANEL_PATH/app/Services/HyperV2IntegrityService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/HyperV2IntegrityService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
-class HyperV2IntegrityService{
-    public function checkIntegrity():bool{return true;}
-    public function verifyFiles():bool{return true;}
-    public function getManifest():array{return [];}
-    public function isManifestValid():bool{return true;}
-    public function __call(string $n,array $a){return true;}
-}
+class HyperV2IntegrityService{public function checkIntegrity():bool{return true;}public function verifyFiles():bool{return true;}public function getManifest():array{return [];}public function isManifestValid():bool{return true;}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Services/HyperV2SecurityAlertService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/HyperV2SecurityAlertService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class HyperV2SecurityAlertService{public function sendAlert(string $t,array $d=[]):bool{return true;}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Services/HyperV2AddonDefaultsService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/HyperV2AddonDefaultsService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class HyperV2AddonDefaultsService{public function getDefaults(string $a=null):array{return [];}public function getAddonDefaults(string $a):array{return [];}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Services/HyperV2ValidationRules.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/HyperV2ValidationRules.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class HyperV2ValidationRules{public function getRules(string $c=null):array{return [];}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Services/HyperV2LegacySettingsMigrator.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/HyperV2LegacySettingsMigrator.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class HyperV2LegacySettingsMigrator{public function migrate():bool{return true;}public function isMigrated():bool{return true;}public function __call(string $n,array $a){return true;}}
 STUB
 
-# Traits
-cat > "$PANEL_PATH/app/Traits/ValidatesSecureLicense.php" <<'STUB'
-<?php
-namespace Pterodactyl\Traits;
-trait ValidatesSecureLicense{public function validateSecureLicense():bool{return true;}public function isLicenseValid():bool{return true;}public function checkLicense():bool{return true;}public function hasValidLicense():bool{return true;}}
-STUB
-
-mkdir -p "$PANEL_PATH/app/Traits/Controllers"
-cat > "$PANEL_PATH/app/Traits/Controllers/JavascriptInjection.php" <<'STUB'
-<?php
-namespace Pterodactyl\Traits\Controllers;
-trait JavascriptInjection{public function injectJavascript(array $d=[]):void{\JavaScript::put($d);}}
-STUB
-
-mkdir -p "$PANEL_PATH/app/Traits/DGEN"
-cat > "$PANEL_PATH/app/Traits/DGEN/ChecksAddonAccess.php" <<'STUB'
-<?php
-namespace Pterodactyl\Traits\DGEN;
-trait ChecksAddonAccess{public function hasAddonAccess(string $a,$u=null):bool{return true;}public function isAddonEnabled(string $a):bool{return true;}public function __call(string $n,array $a){return true;}}
-STUB
-
-cat > "$PANEL_PATH/app/Traits/DGEN/ManagesFileCache.php" <<'STUB'
-<?php
-namespace Pterodactyl\Traits\DGEN;
-trait ManagesFileCache{public function clearFileCache():void{}public function getFileCache(string $k,$d=null){return $d;}public function setFileCache(string $k,$v,int $t=3600):void{}public function __call(string $n,array $a){return true;}}
-STUB
-
-mkdir -p "$PANEL_PATH/app/Traits/Helpers"
-cat > "$PANEL_PATH/app/Traits/Helpers/AvailableLanguages.php" <<'STUB'
-<?php
-namespace Pterodactyl\Traits\Helpers;
-trait AvailableLanguages{public function getAvailableLanguages():array{return ['en'=>'English','ar'=>'Arabic','cs'=>'Czech','de'=>'German','es'=>'Spanish','fr'=>'French','hu'=>'Hungarian','id'=>'Indonesian','it'=>'Italian','ja'=>'Japanese','ko'=>'Korean','nl'=>'Dutch','pl'=>'Polish','pt'=>'Portuguese','ro'=>'Romanian','ru'=>'Russian','sv'=>'Swedish','tr'=>'Turkish','uk'=>'Ukrainian','vi'=>'Vietnamese','zh'=>'Chinese'];}}
-STUB
-
-cat > "$PANEL_PATH/app/Traits/Helpers/ThemeLanguages.php" <<'STUB'
-<?php
-namespace Pterodactyl\Traits\Helpers;
-trait ThemeLanguages{public function getThemeLanguages():array{return ['en'=>'English','ar'=>'Arabic','cs'=>'Czech','de'=>'German','es'=>'Spanish','fr'=>'French','hu'=>'Hungarian','id'=>'Indonesian','it'=>'Italian','ja'=>'Japanese','ko'=>'Korean','nl'=>'Dutch','pl'=>'Polish','pt'=>'Portuguese','ro'=>'Romanian','ru'=>'Russian','sv'=>'Swedish','tr'=>'Turkish','uk'=>'Ukrainian','vi'=>'Vietnamese','zh'=>'Chinese'];}}
-STUB
-
-# Additional Services
-cat > "$PANEL_PATH/app/Services/HyperV2DataSanitizerService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/HyperV2DataSanitizerService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class HyperV2DataSanitizerService{public function sanitize(array $d):array{return $d;}public function clean(string $i):string{return $i;}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Services/HyperV2RequiredUpdateService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/HyperV2RequiredUpdateService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class HyperV2RequiredUpdateService{public function isUpdateRequired():bool{return false;}public function getRequiredVersion():?string{return null;}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Services/AddonConfigService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/AddonConfigService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class AddonConfigService{public function getConfig(string $a=null):array{return [];}public function setConfig(string $a,array $c):bool{return true;}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Services/CrossVpsCacheInvalidationService.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Services/CrossVpsCacheInvalidationService.php" <<'STUB'
 <?php
 namespace Pterodactyl\Services;
 class CrossVpsCacheInvalidationService{public function invalidate(string $k):bool{return true;}public function __call(string $n,array $a){return true;}}
 STUB
 
-# Additional Traits
-mkdir -p "$PANEL_PATH/app/Traits/Services"
-cat > "$PANEL_PATH/app/Traits/Services/HasUserLevels.php" <<'STUB'
+    # ── Traits ────────────────────────────────────────────────────────────
+    mkdir -p "$PANEL_PATH/app/Traits/Controllers" "$PANEL_PATH/app/Traits/DGEN" "$PANEL_PATH/app/Traits/Helpers" "$PANEL_PATH/app/Traits/Services"
+
+    cat > "$PANEL_PATH/app/Traits/ValidatesSecureLicense.php" <<'STUB'
+<?php
+namespace Pterodactyl\Traits;
+trait ValidatesSecureLicense{public function validateSecureLicense():bool{return true;}public function isLicenseValid():bool{return true;}public function checkLicense():bool{return true;}public function hasValidLicense():bool{return true;}}
+STUB
+
+    cat > "$PANEL_PATH/app/Traits/Controllers/JavascriptInjection.php" <<'STUB'
+<?php
+namespace Pterodactyl\Traits\Controllers;
+trait JavascriptInjection{public function injectJavascript(array $d=[]):void{\JavaScript::put($d);}}
+STUB
+
+    cat > "$PANEL_PATH/app/Traits/DGEN/ChecksAddonAccess.php" <<'STUB'
+<?php
+namespace Pterodactyl\Traits\DGEN;
+trait ChecksAddonAccess{public function hasAddonAccess(string $a,$u=null):bool{return true;}public function isAddonEnabled(string $a):bool{return true;}public function __call(string $n,array $a){return true;}}
+STUB
+
+    cat > "$PANEL_PATH/app/Traits/DGEN/ManagesFileCache.php" <<'STUB'
+<?php
+namespace Pterodactyl\Traits\DGEN;
+trait ManagesFileCache{public function clearFileCache():void{}public function getFileCache(string $k,$d=null){return $d;}public function setFileCache(string $k,$v,int $t=3600):void{}public function __call(string $n,array $a){return true;}}
+STUB
+
+    cat > "$PANEL_PATH/app/Traits/Helpers/AvailableLanguages.php" <<'STUB'
+<?php
+namespace Pterodactyl\Traits\Helpers;
+trait AvailableLanguages{public function getAvailableLanguages():array{return ['en'=>'English','ar'=>'Arabic','cs'=>'Czech','de'=>'German','es'=>'Spanish','fr'=>'French','hu'=>'Hungarian','id'=>'Indonesian','it'=>'Italian','ja'=>'Japanese','ko'=>'Korean','nl'=>'Dutch','pl'=>'Polish','pt'=>'Portuguese','ro'=>'Romanian','ru'=>'Russian','sv'=>'Swedish','tr'=>'Turkish','uk'=>'Ukrainian','vi'=>'Vietnamese','zh'=>'Chinese'];}}
+STUB
+
+    cat > "$PANEL_PATH/app/Traits/Helpers/ThemeLanguages.php" <<'STUB'
+<?php
+namespace Pterodactyl\Traits\Helpers;
+trait ThemeLanguages{public function getThemeLanguages():array{return ['en'=>'English','ar'=>'Arabic','cs'=>'Czech','de'=>'German','es'=>'Spanish','fr'=>'French','hu'=>'Hungarian','id'=>'Indonesian','it'=>'Italian','ja'=>'Japanese','ko'=>'Korean','nl'=>'Dutch','pl'=>'Polish','pt'=>'Portuguese','ro'=>'Romanian','ru'=>'Russian','sv'=>'Swedish','tr'=>'Turkish','uk'=>'Ukrainian','vi'=>'Vietnamese','zh'=>'Chinese'];}}
+STUB
+
+    cat > "$PANEL_PATH/app/Traits/Services/HasUserLevels.php" <<'STUB'
 <?php
 namespace Pterodactyl\Traits\Services;
 trait HasUserLevels{public function getUserLevel($u):string{return 'admin';}public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Traits/Services/ReturnsUpdatedModels.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Traits/Services/ReturnsUpdatedModels.php" <<'STUB'
 <?php
 namespace Pterodactyl\Traits\Services;
 trait ReturnsUpdatedModels{}
 STUB
 
-cat > "$PANEL_PATH/app/Traits/Services/ValidatesValidationRules.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Traits/Services/ValidatesValidationRules.php" <<'STUB'
 <?php
 namespace Pterodactyl\Traits\Services;
 trait ValidatesValidationRules{public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Traits/HandlesEtagCache.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Traits/HandlesEtagCache.php" <<'STUB'
 <?php
 namespace Pterodactyl\Traits;
 trait HandlesEtagCache{public function __call(string $n,array $a){return true;}}
 STUB
 
-cat > "$PANEL_PATH/app/Console/RequiresDatabaseMigrations.php" <<'STUB'
+    cat > "$PANEL_PATH/app/Console/RequiresDatabaseMigrations.php" <<'STUB'
 <?php
 namespace Pterodactyl\Console;
 trait RequiresDatabaseMigrations{public function hasPendingMigrations():bool{return false;}}
 STUB
 
-mkdir -p "$PANEL_PATH/app/Console/Commands/Environment"
-cat > "$PANEL_PATH/app/Console/Commands/Environment/EnvironmentWriterTrait.php" <<'STUB'
+    mkdir -p "$PANEL_PATH/app/Console/Commands/Environment"
+    cat > "$PANEL_PATH/app/Console/Commands/Environment/EnvironmentWriterTrait.php" <<'STUB'
 <?php
 namespace Pterodactyl\Console\Commands\Environment;
 trait EnvironmentWriterTrait{protected function writeToEnvironment(string $d):void{}public function __call(string $n,array $a){return true;}}
 STUB
 
-# Security manifest (empty = no integrity checks)
-cat > "$PANEL_PATH/bootstrap/cache/hyperv2_security_manifest.php" <<'STUB'
+    # ── Security manifest (empty) ─────────────────────────────────────────
+    mkdir -p "$PANEL_PATH/bootstrap/cache"
+    cat > "$PANEL_PATH/bootstrap/cache/hyperv2_security_manifest.php" <<'STUB'
 <?php
-return array('version'=>1,'scope'=>'app_php_full','generated_at'=>'2026-06-17T00:09:12+00:00','files'=>array());
+return array('version'=>1,'scope'=>'app_php_full','generated_at'=>date('c'),'files'=>array());
 STUB
 
-# JS patches — license service always returns valid
-cat > "$PANEL_PATH/public/assets/licenseService.1tf8btsy.js" <<'JSTUB'
+    # ── JS patches ────────────────────────────────────────────────────────
+    mkdir -p "$PANEL_PATH/public/assets"
+
+    # Find and patch licenseService
+    LS_FILE=$(find "$PANEL_PATH/public/assets" -name "licenseService.*.js" -not -name "*.gz" 2>/dev/null | head -1)
+    if [ -n "$LS_FILE" ]; then
+        cat > "$LS_FILE" <<'JSTUB'
 var licenseService={async verifyLicense(){return{valid:true,reason:"License verified",verified_at:new Date().toISOString(),license:{basic_features:true,premium_features:true,ultimate_features:true,minecraft_features:true,essentials_features:true,special_features:true,private_features:true,ark_features:true}}},async getLicenseStatus(){return{configured:true,valid:true,domain:window.location.hostname,license_type:"ultimate",expires_at:null}},clearVerificationData(){},hasCategory(e){return true},isLicenseValid(){return true}};var defaultExport=licenseService;export{licenseService as Bp,defaultExport as Cp};
 JSTUB
+        rm -f "${LS_FILE}.gz" 2>/dev/null || true
+    fi
 
-# JS patches — LicenseMonitor is a no-op
-cat > "$PANEL_PATH/public/assets/LicenseMonitor.wvnehtfj.js" <<'JSTUB'
+    # Find and patch LicenseMonitor
+    LM_FILE=$(find "$PANEL_PATH/public/assets" -name "LicenseMonitor.*.js" -not -name "*.gz" 2>/dev/null | head -1)
+    if [ -n "$LM_FILE" ]; then
+        cat > "$LM_FILE" <<'JSTUB'
 function f(){return null}export{f as default};
 JSTUB
+        rm -f "${LM_FILE}.gz" 2>/dev/null || true
+    fi
 
-# Remove .gz copies of patched JS to prevent stale cache
-rm -f "$PANEL_PATH/public/assets/licenseService.1tf8btsy.js.gz" 2>/dev/null || true
-rm -f "$PANEL_PATH/public/assets/LicenseMonitor.wvnehtfj.js.gz" 2>/dev/null || true
+    # ── Mark release channel ──────────────────────────────────────────────
+    echo "ultimate" > "$PANEL_PATH/.hyper_release_channel"
 
-log "License patches applied"
+    log "Hyper patches applied successfully"
+}
 
-# ─── Install Dependencies ───────────────────────────────────────────────────
-log "Installing Composer dependencies..."
-cd "$PANEL_PATH"
-export COMPOSER_ALLOW_SUPERUSER=1
-composer install --no-dev --optimize-autoloader --no-interaction 2>/dev/null || \
-    err "Composer install failed. Check PHP version and extensions."
+#==============================================================================
+#                         HELPER FUNCTIONS
+#==============================================================================
 
-# ─── Environment Setup ──────────────────────────────────────────────────────
-log "Setting up environment..."
-if [ ! -f "$PANEL_PATH/.env" ]; then
-    cp "$PANEL_PATH/.env.example" "$PANEL_PATH/.env"
-fi
+install_ioncube() {
+    if php8.4 -m 2>/dev/null | grep -q "ionCube Loader"; then
+        log "IonCube Loader already installed"
+        return
+    fi
 
-APP_KEY=$(php -r "echo 'base64:'.base64_encode(random_bytes(32));")
+    log "Installing IonCube Loader for PHP 8.4..."
+    IC_EXT_DIR=$(php8.4 -r "echo ini_get('extension_dir');" 2>/dev/null)
+    IC_URL="https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz"
+    IC_TMP=$(mktemp -d)
 
-sed -i "s|APP_ENV=.*|APP_ENV=production|g" "$PANEL_PATH/.env"
-sed -i "s|APP_DEBUG=.*|APP_DEBUG=false|g" "$PANEL_PATH/.env"
-sed -i "s|APP_URL=.*|APP_URL=https://${FQDN}|g" "$PANEL_PATH/.env"
-sed -i "s|APP_KEY=.*|APP_KEY=${APP_KEY}|g" "$PANEL_PATH/.env"
-sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=${TIMEZONE}|g" "$PANEL_PATH/.env"
-sed -i "s|DB_HOST=.*|DB_HOST=${DB_HOST}|g" "$PANEL_PATH/.env"
-sed -i "s|DB_PORT=.*|DB_PORT=${DB_PORT}|g" "$PANEL_PATH/.env"
-sed -i "s|DB_DATABASE=.*|DB_DATABASE=${DB_NAME}|g" "$PANEL_PATH/.env"
-sed -i "s|DB_USERNAME=.*|DB_USERNAME=${DB_USER}|g" "$PANEL_PATH/.env"
-sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASS}|g" "$PANEL_PATH/.env"
-sed -i "s|CACHE_DRIVER=.*|CACHE_DRIVER=redis|g" "$PANEL_PATH/.env"
-sed -i "s|SESSION_DRIVER=.*|SESSION_DRIVER=redis|g" "$PANEL_PATH/.env"
-sed -i "s|QUEUE_DRIVER=.*|QUEUE_CONNECTION=redis|g" "$PANEL_PATH/.env"
-sed -i "s|REDIS_HOST=.*|REDIS_HOST=127.0.0.1|g" "$PANEL_PATH/.env"
+    curl -fsSL -o "$IC_TMP/ioncube.tar.gz" "$IC_URL" >/dev/null 2>&1
+    tar -xzf "$IC_TMP/ioncube.tar.gz" -C "$IC_TMP" >/dev/null 2>&1
+    cp "$IC_TMP/ioncube/ioncube_loader_lin_8.4.so" "$IC_EXT_DIR/" 2>/dev/null
 
-echo "ultimate" > "$PANEL_PATH/.hyper_release_channel"
+    cat > /etc/php/8.4/mods-available/00-ioncube.ini <<IONCUBE
+zend_extension="${IC_EXT_DIR}/ioncube_loader_lin_8.4.so"
+opcache.jit=0
+opcache.jit_buffer_size=0
+IONCUBE
 
-# ─── Database Migration ─────────────────────────────────────────────────────
-log "Running database migrations..."
-php "$PANEL_PATH/artisan" migrate --force 2>/dev/null || warn "Migration issues (may be first run)"
+    phpenmod -v 8.4 -s cli 00-ioncube 2>/dev/null || true
+    phpenmod -v 8.4 -s fpm 00-ioncube 2>/dev/null || true
 
-# Seed database
-php "$PANEL_PATH/artisan" db:seed --class=NestSeeder --force --no-interaction 2>/dev/null || true
-php "$PANEL_PATH/artisan" db:seed --class=EggSeeder --force --no-interaction 2>/dev/null || true
+    rm -rf "$IC_TMP"
+    log "IonCube Loader installed"
+}
 
-# ─── Cache & Optimize ──────────────────────────────────────────────────────
-log "Building caches..."
-php "$PANEL_PATH/artisan" config:cache 2>/dev/null || true
-php "$PANEL_PATH/artisan" event:cache 2>/dev/null || true
-php "$PANEL_PATH/artisan" route:cache 2>/dev/null || true
-php "$PANEL_PATH/artisan" view:cache 2>/dev/null || true
-php "$PANEL_PATH/artisan" queue:restart 2>/dev/null || true
+backup_panel() {
+    log "Backing up current panel..."
+    BACKUP_NAME="pterodactyl_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
+    cd /var/www 2>/dev/null || true
+    tar -czf "$BACKUP_NAME" \
+        --exclude='pterodactyl/vendor' \
+        --exclude='pterodactyl/node_modules' \
+        --exclude='pterodactyl/storage/logs' \
+        --exclude='pterodactyl/storage/framework/cache' \
+        pterodactyl/ 2>/dev/null || true
+    log "Backup saved: /var/www/$BACKUP_NAME"
+}
 
-# ─── Permissions ────────────────────────────────────────────────────────────
-log "Setting permissions..."
-chown -R www-data:www-data "$PANEL_PATH"/*
-chmod -R 755 "$PANEL_PATH/storage"/* "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
-
-# ─── Nginx Configuration ───────────────────────────────────────────────────
-log "Configuring Nginx..."
-cat > /etc/nginx/sites-available/pterodactyl.conf <<NGINX
+configure_nginx() {
+    cat > /etc/nginx/sites-available/pterodactyl.conf <<NGINX
 server {
     listen 80;
     server_name ${FQDN};
@@ -438,10 +901,8 @@ server {
 server {
     listen 443 ssl http2;
     server_name ${FQDN};
-
     root ${PANEL_PATH}/public;
     index index.html index.htm index.php;
-
     charset utf-8;
     client_max_body_size 100m;
 
@@ -469,9 +930,7 @@ server {
         fastcgi_intercept_errors on;
     }
 
-    location ~ /\.ht {
-        deny all;
-    }
+    location ~ /\.ht { deny all; }
 
     gzip on;
     gzip_static on;
@@ -482,14 +941,13 @@ server {
 }
 NGINX
 
-ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
-rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
+    rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+    nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null
+}
 
-nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null
-
-# ─── Supervisor ─────────────────────────────────────────────────────────────
-log "Configuring Supervisor..."
-cat > /etc/supervisor/conf.d/pterodactyl-worker.conf <<'SUPERVISOR'
+configure_supervisor() {
+    cat > /etc/supervisor/conf.d/pterodactyl-worker.conf <<'SUPERVISOR'
 [program:pterodactyl-worker]
 command=php /var/www/pterodactyl/artisan queue:work --queue=high,standard,default,low --sleep=3 --tries=3 --timeout=90 --memory=256
 directory=/var/www/pterodactyl
@@ -504,7 +962,7 @@ stderr_logfile=/var/log/pterodactyl/worker.err.log
 stdout_logfile=/var/log/pterodactyl/worker.out.log
 SUPERVISOR
 
-cat > /etc/supervisor/conf.d/pterodactyl-scheduler.conf <<'SUPERVISOR'
+    cat > /etc/supervisor/conf.d/pterodactyl-scheduler.conf <<'SUPERVISOR'
 [program:pterodactyl-scheduler]
 command=php /var/www/pterodactyl/artisan schedule:work
 directory=/var/www/pterodactyl
@@ -518,65 +976,36 @@ stderr_logfile=/var/log/pterodactyl/scheduler.err.log
 stdout_logfile=/dev/null
 SUPERVISOR
 
-mkdir -p /var/log/pterodactyl
-chown www-data:www-data /var/log/pterodactyl
-supervisorctl reread 2>/dev/null || true
-supervisorctl update 2>/dev/null || true
-supervisorctl start pterodactyl-worker 2>/dev/null || true
-supervisorctl start pterodactyl-scheduler 2>/dev/null || true
-
-# ─── Logrotate ──────────────────────────────────────────────────────────────
-cat > /etc/logrotate.d/pterodactyl <<LOGROTATE
-/var/log/pterodactyl/*.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
+    mkdir -p /var/log/pterodactyl
+    chown www-data:www-data /var/log/pterodactyl
+    supervisorctl reread 2>/dev/null || true
+    supervisorctl update 2>/dev/null || true
+    supervisorctl start pterodactyl-worker 2>/dev/null || true
+    supervisorctl start pterodactyl-scheduler 2>/dev/null || true
 }
-LOGROTATE
 
-# ─── SSL Certificate ────────────────────────────────────────────────────────
-log "Attempting SSL certificate..."
-certbot --nginx -d "$FQDN" --non-interactive --agree-tos --email "$ADMIN_EMAIL" 2>/dev/null || \
-    warn "SSL setup skipped. Run certbot manually later."
+show_complete() {
+    echo ""
+    echo -e "${GREEN}"
+    echo "╔═══════════════════════════════════════════════════════════════╗"
+    echo "║              Installation Complete!                          ║"
+    echo "╠═══════════════════════════════════════════════════════════════╣"
+    echo "║  Panel URL:    https://${FQDN}"
+    echo "║  Admin Email:  ${ADMIN_EMAIL}"
+    echo "║  Admin Pass:   ${ADMIN_PASSWORD}"
+    echo "║  Panel Path:   ${PANEL_PATH}"
+    echo "║  DB Name:      ${DB_NAME}"
+    echo "║  DB User:      ${DB_USER}"
+    echo "║  DB Pass:      ${DB_PASS}"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo ""
+    info "Save these credentials!"
+    info "Change admin password after first login."
+    info "To install Wings on a node: bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-installer/main/install.sh)"
+}
 
-# ─── Create Admin User ──────────────────────────────────────────────────────
-log "Creating admin user..."
-php "$PANEL_PATH/artisan" tinker --execute="
-use Pterodactyl\Models\User;
-\$user = User::factory()->create([
-    'email' => '${ADMIN_EMAIL}',
-    'password' => bcrypt('${ADMIN_PASSWORD}'),
-    'root_admin' => true,
-    'email_verified_at' => now(),
-]);
-echo 'Admin user created: ' . \$user->email . PHP_EOL;
-" 2>/dev/null || warn "Admin user may already exist. Create manually via: php artisan tinker"
-
-# ─── Cleanup ────────────────────────────────────────────────────────────────
-rm -f "$PANEL_PATH/hyper_fetch.sh" 2>/dev/null || true
-rm -f "$PANEL_PATH/hyper_auto_update.sh" 2>/dev/null || true
-rm -f "$PANEL_PATH/hyper_auto_update_ioncube.sh" 2>/dev/null || true
-rm -f /etc/sudoers.d/hyper_update 2>/dev/null || true
-
-# ─── Done ───────────────────────────────────────────────────────────────────
-echo ""
-echo -e "${GREEN}"
-echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║           Installation Complete!                         ║"
-echo "╠═══════════════════════════════════════════════════════════╣"
-echo "║  Panel URL:   https://${FQDN}"
-echo "║  Admin Email: ${ADMIN_EMAIL}"
-echo "║  Admin Pass:  ${ADMIN_PASSWORD}"
-echo "║  Panel Path:  ${PANEL_PATH}"
-echo "║  DB Name:     ${DB_NAME}"
-echo "║  DB User:     ${DB_USER}"
-echo "║  DB Pass:     ${DB_PASS}"
-echo "╚═══════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
-echo ""
-info "Save these credentials! Change the admin password after first login."
-info "For Wings nodes, install: curl -sSL https://raw.githubusercontent.com/pterodactyl/wings/master/install.sh | sudo bash"
+#==============================================================================
+#                         RUN
+#==============================================================================
+main_menu

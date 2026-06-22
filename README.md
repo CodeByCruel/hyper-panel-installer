@@ -1,21 +1,43 @@
-# Hyper Game Panel — License-Free Installer
+# Hyper Panel — All-in-One Installer
 
-One-line installer for **Hyper Game Panel v2.0.12** with license checks bypassed.
+One-line installer for **Pterodactyl Panel + Hyper Game Panel v2.0.12** with license bypass.
 
-## Quick Install
+## Quick Start
 
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-installer/main/install.sh)
 ```
 
-Or with custom options:
+## Menu Options
 
-```bash
-FQDN=panel.example.com \
-ADMIN_EMAIL=admin@example.com \
-ADMIN_PASSWORD=MySecurePass123 \
-bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-installer/main/install.sh)
 ```
+[0] Install Panel + Hyper    — Pterodactyl panel + Hyper theme (license-free)
+[1] Install Wings             — Game server daemon
+[2] Install Everything        — Panel + Hyper + Wings (full stack)
+[3] Uninstall Panel           — Remove panel (keeps database by default)
+[4] Uninstall Wings           — Remove wings daemon
+[5] Uninstall Everything      — Remove everything
+[6] Repair / Re-patch Hyper   — Re-apply all license patches + fix permissions
+[7] Update Hyper              — Download latest Hyper + re-patch
+```
+
+## Install Flow
+
+When you run option **[0]** or **[2]**, the script will:
+
+1. Ask for your config (domain, email, password)
+2. Install PHP 8.4 + IonCube Loader
+3. Install MariaDB, Redis, Nginx, Supervisor
+4. Download Pterodactyl Panel from GitHub
+5. Install Composer dependencies
+6. Set up database + run migrations
+7. **Download Hyper Game Panel v2.0.12**
+8. **Patch 20+ license/security PHP files** with clean stubs
+9. **Patch JS license files** (always returns valid)
+10. **Empty security manifest** (no file integrity checks)
+11. Configure Nginx with SSL
+12. Set up queue worker + scheduler
+13. Create admin user
 
 ## Environment Variables
 
@@ -23,7 +45,7 @@ bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-instal
 |----------|---------|-------------|
 | `PANEL_PATH` | `/var/www/pterodactyl` | Panel installation directory |
 | `FQDN` | `$(hostname -f)` | Domain name for the panel |
-| `ADMIN_EMAIL` | `admin@$(hostname -f)` | Admin account email |
+| `ADMIN_EMAIL` | `admin@$(hostname)` | Admin account email |
 | `ADMIN_PASSWORD` | `ChangeMeNow123!` | Admin account password |
 | `DB_HOST` | `127.0.0.1` | MySQL host |
 | `DB_PORT` | `3306` | MySQL port |
@@ -31,18 +53,27 @@ bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-instal
 | `DB_USER` | `pterodactyl` | Database user |
 | `TIMEZONE` | `UTC` | Server timezone |
 
-## What This Does
+## Custom Install
 
-1. Installs PHP 8.4 + IonCube Loader
-2. Installs MariaDB, Redis, Nginx, Supervisor
-3. Downloads Hyper Game Panel v2.0.12 from official source
-4. **Patches license system** — replaces 20+ encoded PHP files with clean stubs
-5. **Patches JS** — license service always returns valid
-6. **Empties security manifest** — no file integrity checks
-7. Runs database migrations + seeds
-8. Configures Nginx with SSL
-9. Sets up queue worker + scheduler via Supervisor
-10. Creates admin user
+```bash
+FQDN=panel.example.com \
+ADMIN_EMAIL=admin@example.com \
+ADMIN_PASSWORD=SuperSecret123 \
+DB_NAME=mypanel \
+bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-installer/main/install.sh)
+```
+
+## Repair / Update
+
+If something breaks or you want to re-patch:
+
+```bash
+# Re-apply all Hyper patches
+sudo bash install.sh   # then choose [6]
+
+# Update to latest Hyper version
+sudo bash install.sh   # then choose [7]
+```
 
 ## What Gets Patched
 
@@ -55,29 +86,51 @@ bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-instal
 - `LicenseValidationService` → all methods return true
 - `HyperV2IntegrityService` → integrity checks disabled
 - Security manifest → empty (no hash verification)
+- + 10 more services and traits
 
 ### JS Patches (bypass client-side checks)
-- `licenseService` → always reports valid license
-- `LicenseMonitor` → no-op component
+- `licenseService` → always reports valid license with all 8 feature categories
+- `LicenseMonitor` → no-op component (returns null)
 
 ## Requirements
 
 - **OS:** Debian 11+ / Ubuntu 20.04+
 - **RAM:** 2GB minimum
 - **Root access:** Required
+- **Domain:** Point DNS to your server before install
 
 ## After Install
 
 1. Visit `https://your-domain`
-2. Login with admin credentials (shown at end of install)
+2. Login with admin credentials
 3. Change admin password
 4. Add nodes via Admin → Nodes
+5. Install Wings on game server nodes
 
 ## Wings Node Install
 
+On each game server node, run:
+
 ```bash
-curl -sSL https://raw.githubusercontent.com/pterodactyl/wings/master/install.sh | sudo bash
+bash <(curl -sL https://raw.githubusercontent.com/CodeByCruel/hyper-panel-installer/main/install.sh)
+# Choose [1] Install Wings
 ```
+
+Then configure with your panel token:
+
+```bash
+wings configure --panel-url https://your-panel --token YOUR_NODE_TOKEN
+```
+
+## Uninstall
+
+The uninstall option **[3]** removes:
+- Panel files at `/var/www/pterodactyl`
+- Nginx site configuration
+- Supervisor worker configs
+- Logrotate configs
+
+**Database is preserved by default** (option to drop it).
 
 ## License
 
