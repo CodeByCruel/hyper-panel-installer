@@ -669,6 +669,9 @@ install_hyper_only() {
     # ── Apply patches ──────────────────────────────────────────────────────
     apply_hyper
 
+    # ── Ensure ionCube Loader is present ───────────────────────────────────
+    install_ioncube
+
     # ── Permissions ────────────────────────────────────────────────────────
     step "Fixing permissions"
     chown -R www-data:www-data "$PANEL_PATH"
