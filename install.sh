@@ -131,9 +131,10 @@ main_menu() {
     echo -e "  ${YELLOW}[6]${NC} Repair / Re-patch Hyper"
     echo -e "  ${YELLOW}[7]${NC} Update Hyper to latest"
     echo -e "  ${GREEN}[8]${NC} Install Hyper only (on existing panel)"
+    echo -e "  ${RED}[9]${NC} Uninstall Hyper only (restore clean Pterodactyl)"
     echo ""
 
-    echo -n "* Choose option (0-8): "
+    echo -n "* Choose option (0-9): "
     read -r CHOICE
 
     case "${CHOICE:-}" in
@@ -146,7 +147,8 @@ main_menu() {
         6) repair_hyper ;;
         7) update_hyper ;;
         8) install_hyper_only ;;
-        *) err "Invalid option. Please choose 0-8." ;;
+        9) uninstall_hyper_only ;;
+        *) err "Invalid option. Please choose 0-9." ;;
     esac
 }
 
@@ -501,6 +503,101 @@ uninstall_wings() {
     }
 
     log "Wings uninstalled."
+}
+
+uninstall_hyper_only() {
+    step "Uninstalling Hyper — restoring clean Pterodactyl"
+
+    check_root
+
+    if ! panel_installed; then
+        err "Panel not found at $PANEL_PATH. Nothing to do."
+    fi
+
+    if ! hyper_patched; then
+        warn "Hyper does not appear to be installed on this panel."
+        echo -n "* Continue anyway? (y/N): "
+        read -r CONFIRM
+        [[ ! "$CONFIRM" =~ [Yy] ]] && return
+    fi
+
+    echo -n "* Type 'DELETE' to confirm Hyper removal: "
+    read -r CONFIRM
+    [[ "$CONFIRM" != "DELETE" ]] && info "Uninstall cancelled." && return
+
+    # ── Backup current state ──────────────────────────────────────────────
+    BACKUP="/tmp/hyper_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$BACKUP"
+    cp "$PANEL_PATH/.env" "$BACKUP/" 2>/dev/null || true
+    cp -r "$PANEL_PATH/storage" "$BACKUP/" 2>/dev/null || true
+    cp -r "$PANEL_PATH/resources/views" "$BACKUP/" 2>/dev/null || true
+    log "Backed up .env, storage, views to $BACKUP"
+
+    # ── Download clean Pterodactyl ────────────────────────────────────────
+    step "Downloading clean Pterodactyl panel"
+    TMP_DL=$(mktemp -d)
+    PTERO_URL="https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz"
+    curl -fsSL -o "$TMP_DL/panel.tar.gz" "$PTERO_URL" 2>/dev/null || err "Failed to download Pterodactyl panel."
+    mkdir -p "$TMP_DL/panel" && tar -xzf "$TMP_DL/panel.tar.gz" -C "$TMP_DL/panel" 2>/dev/null
+
+    # ── Replace core directories with clean originals ──────────────────────
+    step "Replacing Hyper files with clean Pterodactyl"
+    for d in app config database routes; do
+        rm -rf "$PANEL_PATH/$d"
+        cp -rf "$TMP_DL/panel/$d" "$PANEL_PATH/"
+        log "  Restored: $d/"
+    done
+
+    # ── Restore user data ─────────────────────────────────────────────────
+    cp "$BACKUP/.env" "$PANEL_PATH/.env" 2>/dev/null || true
+    rm -rf "$PANEL_PATH/storage"
+    cp -rf "$BACKUP/storage" "$PANEL_PATH/storage" 2>/dev/null || true
+    rm -rf "$PANEL_PATH/resources/views"
+    cp -rf "$BACKUP/views" "$PANEL_PATH/resources/views" 2>/dev/null || true
+
+    # ── Remove Hyper-specific files ───────────────────────────────────────
+    rm -f "$PANEL_PATH/public/assets/licenseService"*.js 2>/dev/null || true
+    rm -f "$PANEL_PATH/public/assets/LicenseMonitor"*.js 2>/dev/null || true
+    rm -f "$PANEL_PATH/bootstrap/cache/hyperv2_security_manifest.php" 2>/dev/null || true
+    rm -rf "$PANEL_PATH/app/Http/Middleware/HyperV2"* 2>/dev/null || true
+    rm -rf "$PANEL_PATH/app/Http/Middleware/EnforceHyperV2"* 2>/dev/null || true
+
+    rm -rf "$TMP_DL"
+
+    # ── Fix permissions ───────────────────────────────────────────────────
+    step "Fixing permissions"
+    chown -R www-data:www-data "$PANEL_PATH"
+    chmod -R 755 "$PANEL_PATH/storage"/* 2>/dev/null || true
+    chmod -R 755 "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
+
+    # ── Rebuild caches ────────────────────────────────────────────────────
+    step "Rebuilding caches"
+    cd "$PANEL_PATH"
+    php artisan config:clear 2>/dev/null || true
+    php artisan cache:clear 2>/dev/null || true
+    php artisan route:clear 2>/dev/null || true
+    php artisan view:clear 2>/dev/null || true
+    php artisan config:cache 2>/dev/null || true
+    php artisan event:cache 2>/dev/null || true
+    php artisan view:cache 2>/dev/null || true
+
+    # ── Restart services ──────────────────────────────────────────────────
+    step "Restarting services"
+    command -v supervisorctl &>/dev/null && {
+        supervisorctl restart pterodactyl-worker 2>/dev/null || true
+        supervisorctl restart pterodactyl-scheduler 2>/dev/null || true
+    }
+    systemctl restart php${PHP_VER}-fpm 2>/dev/null || service php${PHP_VER}-fpm restart 2>/dev/null || true
+    systemctl restart nginx 2>/dev/null || service nginx restart 2>/dev/null || true
+
+    rm -rf "$BACKUP"
+
+    echo ""
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║         Hyper removed! Clean Pterodactyl restored.      ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    log "Hyper uninstalled. Panel restored to clean Pterodactyl at $PANEL_PATH"
 }
 
 #==============================================================================
