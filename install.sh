@@ -1082,8 +1082,26 @@ STUB
 return array('version'=>1,'scope'=>'app_php_full','generated_at'=>date('c'),'files'=>array());
 STUB
 
-    # ── JS patches ────────────────────────────────────────────────────────
+    # ── Fix ManifestDoesNotExistException (Hyper needs Spatie\Ignition which may not exist) ──
+    mkdir -p "$PANEL_PATH/app/Exceptions"
+    cat > "$PANEL_PATH/app/Exceptions/ManifestDoesNotExistException.php" <<'STUB'
+<?php
+namespace Pterodactyl\Exceptions;
+use RuntimeException;
+class ManifestDoesNotExistException extends RuntimeException
+{
+    public function __construct(string $path = '')
+    {
+        parent::__construct('The security manifest file could not be found' . ($path ? ': ' . $path : ''));
+    }
+}
+STUB
+
+    # ── Ensure assets manifest.json exists (AssetHashService needs it) ────
     mkdir -p "$PANEL_PATH/public/assets"
+    [ ! -f "$PANEL_PATH/public/assets/manifest.json" ] && echo '{}' > "$PANEL_PATH/public/assets/manifest.json"
+
+    # ── JS patches ────────────────────────────────────────────────────────
 
     # Find and patch licenseService
     LS_FILE=$(find "$PANEL_PATH/public/assets" -name "licenseService.*.js" -not -name "*.gz" 2>/dev/null | head -1)
