@@ -956,31 +956,68 @@ JSTUB
 #==============================================================================
 
 install_ioncube() {
-    if php8.4 -m 2>/dev/null | grep -q "ionCube Loader"; then
-        log "IonCube Loader already installed"
+    # Auto-detect PHP version
+    IC_PHP_VER=""
+    for v in 8.4 8.3 8.2 8.1; do
+        if command -v "php$v" &>/dev/null; then
+            IC_PHP_VER="$v"
+            break
+        fi
+    done
+    if [ -z "$IC_PHP_VER" ]; then
+        IC_PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)
+    fi
+    if [ -z "$IC_PHP_VER" ]; then
+        warn "Could not detect PHP version — skipping ionCube"
         return
     fi
 
-    log "Installing IonCube Loader for PHP 8.4..."
-    IC_EXT_DIR=$(php8.4 -r "echo ini_get('extension_dir');" 2>/dev/null)
+    if "php$IC_PHP_VER" -m 2>/dev/null | grep -qi "ioncube"; then
+        log "IonCube Loader already installed for PHP $IC_PHP_VER"
+        return
+    fi
+
+    log "Installing IonCube Loader for PHP $IC_PHP_VER..."
+    IC_EXT_DIR=$("php$IC_PHP_VER" -r "echo ini_get('extension_dir');" 2>/dev/null)
+    if [ -z "$IC_EXT_DIR" ] || [ ! -d "$IC_EXT_DIR" ]; then
+        warn "Could not determine PHP extension directory — skipping ionCube"
+        return
+    fi
+
     IC_URL="https://downloads.ioncube.com/loader_downloads/ioncube_loaders_lin_x86-64.tar.gz"
     IC_TMP=$(mktemp -d)
 
-    curl -fsSL -o "$IC_TMP/ioncube.tar.gz" "$IC_URL" >/dev/null 2>&1
-    tar -xzf "$IC_TMP/ioncube.tar.gz" -C "$IC_TMP" >/dev/null 2>&1
-    cp "$IC_TMP/ioncube/ioncube_loader_lin_8.4.so" "$IC_EXT_DIR/" 2>/dev/null
+    if ! curl -fsSL -o "$IC_TMP/ioncube.tar.gz" "$IC_URL" 2>/dev/null; then
+        warn "Failed to download ionCube Loader"
+        rm -rf "$IC_TMP"
+        return
+    fi
 
-    cat > /etc/php/8.4/mods-available/00-ioncube.ini <<IONCUBE
-zend_extension="${IC_EXT_DIR}/ioncube_loader_lin_8.4.so"
+    tar -xzf "$IC_TMP/ioncube.tar.gz" -C "$IC_TMP" 2>/dev/null || { warn "Failed to extract ionCube archive"; rm -rf "$IC_TMP"; return; }
+
+    if ! cp "$IC_TMP/ioncube/ioncube_loader_lin_${IC_PHP_VER}.so" "$IC_EXT_DIR/" 2>/dev/null; then
+        warn "ionCube .so file not found for PHP $IC_PHP_VER"
+        rm -rf "$IC_TMP"
+        return
+    fi
+
+    cat > "/etc/php/${IC_PHP_VER}/mods-available/00-ioncube.ini" <<IONCUBE
+zend_extension="${IC_EXT_DIR}/ioncube_loader_lin_${IC_PHP_VER}.so"
 opcache.jit=0
 opcache.jit_buffer_size=0
 IONCUBE
 
-    phpenmod -v 8.4 -s cli 00-ioncube 2>/dev/null || true
-    phpenmod -v 8.4 -s fpm 00-ioncube 2>/dev/null || true
+    phpenmod -v "$IC_PHP_VER" -s cli 00-ioncube 2>/dev/null || true
+    phpenmod -v "$IC_PHP_VER" -s fpm 00-ioncube 2>/dev/null || true
 
     rm -rf "$IC_TMP"
-    log "IonCube Loader installed"
+
+    # Verify installation
+    if "php$IC_PHP_VER" -m 2>/dev/null | grep -qi "ioncube"; then
+        log "IonCube Loader installed successfully for PHP $IC_PHP_VER"
+    else
+        warn "ionCube installed but not detected by PHP — may need manual verification"
+    fi
 }
 
 backup_panel() {
