@@ -123,7 +123,7 @@ main_menu() {
     echo -e "  ${GREEN}[8]${NC} Install Hyper only (on existing panel)"
     echo ""
 
-    echo -n "* Choose option (0-7): "
+    echo -n "* Choose option (0-8): "
     read -r CHOICE
 
     case "${CHOICE:-}" in
