@@ -525,42 +525,62 @@ uninstall_hyper_only() {
     read -r CONFIRM
     [[ "$CONFIRM" != "DELETE" ]] && info "Uninstall cancelled." && return
 
-    # ── Backup current state ──────────────────────────────────────────────
-    BACKUP="/tmp/hyper_backup_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$BACKUP"
-    cp "$PANEL_PATH/.env" "$BACKUP/" 2>/dev/null || true
-    cp -r "$PANEL_PATH/storage" "$BACKUP/" 2>/dev/null || true
-    cp -r "$PANEL_PATH/resources/views" "$BACKUP/" 2>/dev/null || true
-    log "Backed up .env, storage, views to $BACKUP"
+    # ── Remove Hyper-specific added files ─────────────────────────────────
+    step "Removing Hyper files"
 
-    # ── Download clean Pterodactyl ────────────────────────────────────────
-    step "Downloading clean Pterodactyl panel"
-    TMP_DL=$(mktemp -d)
-    PTERO_URL="https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz"
-    curl -fsSL -o "$TMP_DL/panel.tar.gz" "$PTERO_URL" 2>/dev/null || err "Failed to download Pterodactyl panel."
-    mkdir -p "$TMP_DL/panel" && tar -xzf "$TMP_DL/panel.tar.gz" -C "$TMP_DL/panel" 2>/dev/null
+    # License middleware stubs
+    rm -f "$PANEL_PATH/app/Http/Middleware/HyperV2LicenseGate.php" 2>/dev/null || true
+    rm -f "$PANEL_PATH/app/Http/Middleware/HyperV2SecurityMonitor.php" 2>/dev/null || true
+    rm -f "$PANEL_PATH/app/Http/Middleware/EnforceHyperV2PanelAccess.php" 2>/dev/null || true
 
-    # ── Replace core directories with clean originals ──────────────────────
-    step "Replacing Hyper files with clean Pterodactyl"
-    for d in app config database routes; do
-        rm -rf "$PANEL_PATH/$d"
-        cp -rf "$TMP_DL/panel/$d" "$PANEL_PATH/"
-        log "  Restored: $d/"
-    done
+    # Security manifest
+    rm -f "$PANEL_PATH/bootstrap/cache/hyperv2_security_manifest.php" 2>/dev/null || true
 
-    # ── Restore user data ─────────────────────────────────────────────────
-    cp "$BACKUP/.env" "$PANEL_PATH/.env" 2>/dev/null || true
-    rm -rf "$PANEL_PATH/storage"
-    cp -rf "$BACKUP/storage" "$PANEL_PATH/storage" 2>/dev/null || true
-    rm -rf "$PANEL_PATH/resources/views"
-    cp -rf "$BACKUP/views" "$PANEL_PATH/resources/views" 2>/dev/null || true
-
-    # ── Remove Hyper-specific files ───────────────────────────────────────
+    # JS license patches
     rm -f "$PANEL_PATH/public/assets/licenseService"*.js 2>/dev/null || true
     rm -f "$PANEL_PATH/public/assets/LicenseMonitor"*.js 2>/dev/null || true
-    rm -f "$PANEL_PATH/bootstrap/cache/hyperv2_security_manifest.php" 2>/dev/null || true
-    rm -rf "$PANEL_PATH/app/Http/Middleware/HyperV2"* 2>/dev/null || true
-    rm -rf "$PANEL_PATH/app/Http/Middleware/EnforceHyperV2"* 2>/dev/null || true
+
+    log "  Removed Hyper middleware, manifest, and JS patches"
+
+    # ── Surgically replace ONLY ionCube-encoded PHP files ──────────────────
+    step "Replacing ionCube-encoded files with clean originals"
+    TMP_DL=$(mktemp -d)
+    PTERO_URL="https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz"
+    curl -fsSL -o "$TMP_DL/panel.tar.gz" "$PTERO_URL" 2>/dev/null || err "Failed to download clean panel."
+    mkdir -p "$TMP_DL/panel" && tar -xzf "$TMP_DL/panel.tar.gz" -C "$TMP_DL/panel" 2>/dev/null
+
+    REPLACED=0
+    find "$PANEL_PATH" -name "*.php" -type f \
+        ! -path "*/vendor/*" \
+        ! -path "*/node_modules/*" \
+        ! -path "*/storage/*" \
+        ! -path "*/.git/*" \
+        ! -path "*/bootstrap/cache/*" \
+        2>/dev/null | while read f; do
+
+        HEADER=$(head -3 "$f" 2>/dev/null)
+        IS_ENCODED=false
+        if echo "$HEADER" | grep -qP '<\?php\s*//[0-9a-fA-F]{3,5}'; then
+            IS_ENCODED=true
+        fi
+        if echo "$HEADER" | grep -qi "ionCube Loader\|encoded\|corrupted"; then
+            IS_ENCODED=true
+        fi
+
+        if [ "$IS_ENCODED" = true ]; then
+            REL="${f#$PANEL_PATH/}"
+            CLEAN="$TMP_DL/panel/$REL"
+            if [ -f "$CLEAN" ]; then
+                CLEAN_HEADER=$(head -3 "$CLEAN" 2>/dev/null)
+                if ! echo "$CLEAN_HEADER" | grep -qP '<\?php\s*//[0-9a-fA-F]{3,5}'; then
+                    if ! echo "$CLEAN_HEADER" | grep -qi "ionCube Loader\|encoded\|corrupted"; then
+                        cp "$CLEAN" "$f"
+                        log "  Restored: $REL"
+                    fi
+                fi
+            fi
+        fi
+    done
 
     rm -rf "$TMP_DL"
 
@@ -573,6 +593,7 @@ uninstall_hyper_only() {
     # ── Rebuild caches ────────────────────────────────────────────────────
     step "Rebuilding caches"
     cd "$PANEL_PATH"
+    rm -f "$PANEL_PATH/bootstrap/cache/"*.php 2>/dev/null || true
     php artisan config:clear 2>/dev/null || true
     php artisan cache:clear 2>/dev/null || true
     php artisan route:clear 2>/dev/null || true
@@ -589,8 +610,6 @@ uninstall_hyper_only() {
     }
     systemctl restart php${PHP_VER}-fpm 2>/dev/null || service php${PHP_VER}-fpm restart 2>/dev/null || true
     systemctl restart nginx 2>/dev/null || service nginx restart 2>/dev/null || true
-
-    rm -rf "$BACKUP"
 
     echo ""
     echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
