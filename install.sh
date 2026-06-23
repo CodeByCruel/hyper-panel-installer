@@ -120,6 +120,7 @@ main_menu() {
     echo ""
     echo -e "  ${YELLOW}[6]${NC} Repair / Re-patch Hyper"
     echo -e "  ${YELLOW}[7]${NC} Update Hyper to latest"
+    echo -e "  ${GREEN}[8]${NC} Install Hyper only (on existing panel)"
     echo ""
 
     echo -n "* Choose option (0-7): "
@@ -134,7 +135,8 @@ main_menu() {
         5) uninstall_panel; uninstall_wings ;;
         6) repair_hyper ;;
         7) update_hyper ;;
-        *) err "Invalid option. Please choose 0-7." ;;
+        8) install_hyper_only ;;
+        *) err "Invalid option. Please choose 0-8." ;;
     esac
 }
 
@@ -610,6 +612,96 @@ update_hyper() {
     chown -R www-data:www-data "$PANEL_PATH"
 
     log "Hyper updated to latest version!"
+}
+
+# ─── Install Hyper Only (on existing panel) ─────────────────────────────────
+install_hyper_only() {
+    step "Installing Hyper Game Panel on Existing Pterodactyl"
+
+    check_root
+
+    if ! panel_installed; then
+        err "Panel not found at $PANEL_PATH.\n  Install Pterodactyl first, then run this option.\n  Or use option [0] for a fresh install."
+    fi
+
+    if hyper_patched; then
+        warn "Hyper is already patched on this panel."
+        echo -n "* Re-install Hyper? (y/N): "
+        read -r CONFIRM
+        [[ ! "$CONFIRM" =~ [Yy] ]] && return
+    fi
+
+    # ── Download Hyper ────────────────────────────────────────────────────
+    step "Downloading Hyper Game Panel"
+    DOWNLOAD_URL=$(curl -fsSL "$HYPER_API" 2>/dev/null | \
+        php -r '$r=json_decode(file_get_contents("php://stdin"),true);echo $r["latest_version"]["download_url"]??"";' 2>/dev/null || true)
+
+    if [ -z "$DOWNLOAD_URL" ] || [[ "$DOWNLOAD_URL" != http* ]]; then
+        err "Failed to fetch Hyper from API. Check your internet connection."
+    fi
+
+    info "Download URL resolved. Downloading..."
+    TMP_DL=$(mktemp -d)
+    curl -fSL --retry 3 -o "$TMP_DL/Hyper.zip" "$DOWNLOAD_URL" 2>/dev/null || \
+        err "Failed to download Hyper."
+
+    # ── Extract ────────────────────────────────────────────────────────────
+    step "Extracting Hyper files"
+    rm -f "$PANEL_PATH/public/assets/licenseService"*.js 2>/dev/null || true
+    rm -f "$PANEL_PATH/public/assets/LicenseMonitor"*.js 2>/dev/null || true
+
+    unzip -oq "$TMP_DL/Hyper.zip" -d "$TMP_DL/hyper" 2>/dev/null || \
+        tar -xf "$TMP_DL/Hyper.zip" -C "$TMP_DL/hyper" 2>/dev/null || \
+        err "Failed to extract Hyper archive."
+
+    # Copy Hyper files over panel
+    [ -d "$TMP_DL/hyper/app" ] && cp -rf "$TMP_DL/hyper/app/"* "$PANEL_PATH/app/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/public" ] && cp -rf "$TMP_DL/hyper/public/"* "$PANEL_PATH/public/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/config" ] && cp -rf "$TMP_DL/hyper/config/"* "$PANEL_PATH/config/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/database" ] && cp -rf "$TMP_DL/hyper/database/"* "$PANEL_PATH/database/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/resources" ] && cp -rf "$TMP_DL/hyper/resources/"* "$PANEL_PATH/resources/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/routes" ] && cp -rf "$TMP_DL/hyper/routes/"* "$PANEL_PATH/routes/" 2>/dev/null || true
+    [ -d "$TMP_DL/hyper/bootstrap" ] && cp -rf "$TMP_DL/hyper/bootstrap/"* "$PANEL_PATH/bootstrap/" 2>/dev/null || true
+
+    rm -rf "$TMP_DL"
+    log "Hyper files extracted"
+
+    # ── Apply patches ──────────────────────────────────────────────────────
+    apply_hyper
+
+    # ── Permissions ────────────────────────────────────────────────────────
+    step "Fixing permissions"
+    chown -R www-data:www-data "$PANEL_PATH"
+    chmod -R 755 "$PANEL_PATH/storage"/* 2>/dev/null || true
+    chmod -R 755 "$PANEL_PATH"/bootstrap/cache/ 2>/dev/null || true
+
+    # ── Rebuild caches ─────────────────────────────────────────────────────
+    step "Rebuilding caches"
+    cd "$PANEL_PATH"
+    php artisan config:clear 2>/dev/null || true
+    php artisan cache:clear 2>/dev/null || true
+    php artisan route:clear 2>/dev/null || true
+    php artisan view:clear 2>/dev/null || true
+    php artisan config:cache 2>/dev/null || true
+    php artisan event:cache 2>/dev/null || true
+    php artisan view:cache 2>/dev/null || true
+
+    # ── Restart services ───────────────────────────────────────────────────
+    step "Restarting services"
+    command -v supervisorctl &>/dev/null && {
+        supervisorctl restart pterodactyl-worker 2>/dev/null || true
+        supervisorctl restart pterodactyl-scheduler 2>/dev/null || true
+    }
+    systemctl restart php8.4-fpm 2>/dev/null || service php8.4-fpm restart 2>/dev/null || true
+    systemctl restart nginx 2>/dev/null || service nginx restart 2>/dev/null || true
+
+    echo ""
+    echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║        Hyper Game Panel installed successfully!          ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    log "Hyper installed on existing panel at $PANEL_PATH"
+    info "Visit your panel to see the Hyper theme."
 }
 
 #==============================================================================
