@@ -28,6 +28,16 @@ HYPER_VERSION="v2.0.12"
 HYPER_API="https://license.dgenx.net/api/v1/update-check?app_id=7c4efcdc-986e-4e85-9b07-328d6ad6db52&file_slug=default"
 DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-3306}"
+
+# Auto-detect PHP version (prefer 8.4, fallback 8.3)
+PHP_VER=""
+for _v in 8.4 8.3 8.2 8.1; do
+    if command -v "php$_v" &>/dev/null; then
+        PHP_VER="$_v"
+        break
+    fi
+done
+PHP_VER="${PHP_VER:-8.4}"
 DB_NAME="${DB_NAME:-pterodactyl}"
 DB_USER="${DB_USER:-pterodactyl}"
 FQDN="${FQDN:-}"
@@ -183,19 +193,19 @@ install_panel_hyper() {
     apt-get update -y >/dev/null 2>&1
     apt-get install -y software-properties-common curl wget unzip git >/dev/null 2>&1
 
-    # PHP 8.4
-    if ! php8.4 -v &>/dev/null; then
-        info "Adding PHP 8.4 repository..."
+    # PHP
+    if ! "php$PHP_VER" -v &>/dev/null; then
+        info "Adding PHP repository..."
         add-apt-repository -y ppa:ondrej/php >/dev/null 2>&1 || true
         apt-get update -y >/dev/null 2>&1
     fi
 
-    log "Installing PHP 8.4 + extensions..."
+    log "Installing PHP $PHP_VER + extensions..."
     apt-get install -y \
-        php8.4 php8.4-cli php8.4-fpm \
-        php8.4-bcmath php8.4-curl php8.4-gd \
-        php8.4-mbstring php8.4-mysql php8.4-opcache \
-        php8.4-xml php8.4-zip php8.4-intl php8.4-redis \
+        php${PHP_VER} php${PHP_VER}-cli php${PHP_VER}-fpm \
+        php${PHP_VER}-bcmath php${PHP_VER}-curl php${PHP_VER}-gd \
+        php${PHP_VER}-mbstring php${PHP_VER}-mysql php${PHP_VER}-opcache \
+        php${PHP_VER}-xml php${PHP_VER}-zip php${PHP_VER}-intl php${PHP_VER}-redis \
         nginx mariadb-server redis-server \
         composer certbot python3-certbot-nginx \
         supervisor logrotate >/dev/null 2>&1
@@ -206,7 +216,7 @@ install_panel_hyper() {
     # Start services
     systemctl enable --now mysql 2>/dev/null || service mysql start 2>/dev/null || true
     systemctl enable --now redis-server 2>/dev/null || service redis-server start 2>/dev/null || true
-    systemctl enable --now php8.4-fpm 2>/dev/null || service php8.4-fpm start 2>/dev/null || true
+    systemctl enable --now php${PHP_VER}-fpm 2>/dev/null || service php${PHP_VER}-fpm start 2>/dev/null || true
 
     # ── Database ───────────────────────────────────────────────────────────
     step "Configuring Database"
@@ -695,12 +705,12 @@ install_hyper_only() {
         supervisorctl restart pterodactyl-worker 2>/dev/null || true
         supervisorctl restart pterodactyl-scheduler 2>/dev/null || true
     }
-    systemctl restart php8.4-fpm 2>/dev/null || service php8.4-fpm restart 2>/dev/null || true
+    systemctl restart php${PHP_VER}-fpm 2>/dev/null || service php${PHP_VER}-fpm restart 2>/dev/null || true
     systemctl restart nginx 2>/dev/null || service nginx restart 2>/dev/null || true
 
     echo ""
     echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║        Hyper Game Panel installed successfully!          ║${NC}"
+    echo -e "${GREEN}║              Panel + Hyper installed!                    ║${NC}"
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo ""
     log "Hyper installed on existing panel at $PANEL_PATH"
@@ -713,6 +723,38 @@ install_hyper_only() {
 
 apply_hyper() {
     log "Applying Hyper license patches..."
+
+    # ── Restore helpers.php (Hyper overwrites with ionCube-encoded version) ─
+    cat > "$PANEL_PATH/app/helpers.php" <<'HELPERSTUB'
+<?php
+
+if (!function_exists('is_digit')) {
+    function is_digit(mixed $value): bool
+    {
+        return !is_bool($value) && ctype_digit(strval($value));
+    }
+}
+
+if (!function_exists('object_get_strict')) {
+    function object_get_strict(object $object, ?string $key, $default = null): mixed
+    {
+        if (is_null($key) || trim($key) == '') {
+            return $object;
+        }
+
+        foreach (explode('.', $key) as $segment) {
+            if (!is_object($object) || !property_exists($object, $segment)) {
+                return value($default);
+            }
+
+            $object = $object->{$segment};
+        }
+
+        return $object;
+    }
+}
+HELPERSTUB
+    log "Restored clean helpers.php"
 
     # ── Middleware stubs ───────────────────────────────────────────────────
     mkdir -p "$PANEL_PATH/app/Http/Middleware"
@@ -1055,7 +1097,7 @@ server {
 
     location ~ \.php$ {
         fastcgi_split_path_info ^(.+\.php)(/.+)$;
-        fastcgi_pass unix:/run/php/php8.4-fpm.sock;
+        fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
         fastcgi_index index.php;
         include fastcgi_params;
         fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
